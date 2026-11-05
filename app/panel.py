@@ -13,7 +13,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 import usage
 
-from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, folder_for, publish, read, subscription, validate_template
+from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, user_id, find_user, folder_for, publish, read, subscription, validate_template
 
 SOCKET = Path(os.environ.get("PANEL_SOCKET", "/run/panel/panel.sock"))
 CSRF = secrets.token_urlsafe(32)
@@ -49,7 +49,7 @@ const agentStatus = document.getElementById('ua-status');
 const agentSearch = document.getElementById('ua-search');
 const agentPrev = document.getElementById('ua-prev');
 const agentNext = document.getElementById('ua-next');
-let agentFolder = '', agentPage = 1, agentRequest, agentSource, agentVersion, agentCsrf;
+let agentId = '', agentPage = 1, agentRequest, agentSource, agentVersion, agentCsrf;
 const agentFeedback = document.getElementById('ua-feedback');
 
 async function loadAgents(page = 1) {
@@ -59,7 +59,7 @@ async function loadAgents(page = 1) {
   agentStatus.textContent = '正在加载…';
   agentList.replaceChildren();
   agentPrev.disabled = agentNext.disabled = true;
-  const params = new URLSearchParams({folder: agentFolder, q: agentSearch.value.trim(), page});
+  const params = new URLSearchParams({id: agentId, q: agentSearch.value.trim(), page});
   try {
     const response = await fetch('/panel/user-agents?' + params, {signal: request.signal});
     if (!response.ok) throw new Error('load failed');
@@ -114,7 +114,7 @@ document.addEventListener('click', async (event) => {
     agentFeedback.textContent = '';
     try {
       const body = new URLSearchParams({
-        csrf: agentCsrf, version: agentVersion, folder: agentFolder, user_agent: removeAgent.dataset.deleteAgent
+        csrf: agentCsrf, version: agentVersion, id: agentId, user_agent: removeAgent.dataset.deleteAgent
       });
       const response = await fetch('/panel/user-agents/delete', {method: 'POST', body});
       if (!response.ok) throw new Error('delete failed');
@@ -133,7 +133,7 @@ document.addEventListener('click', async (event) => {
   }
   const agentButton = event.target.closest('button[data-agents]');
   if (agentButton) {
-    agentFolder = agentButton.dataset.agents;
+    agentId = agentButton.dataset.agents;
     agentSource = agentButton;
     agentFeedback.textContent = '';
     agentSearch.value = '';
@@ -201,13 +201,13 @@ def subscriber_list(version, users, query="", page_number=1):
     for user in visible:
         email, folder = escape(user["email"]), escape(user["folder"])
         url = escape(subscription(user), quote=True)
-        edit = "/panel/edit?" + urlencode({"folder": user["folder"]})
+        edit = "/panel/edit?" + urlencode({"id": user_id(user)})
         label, action, button = ("启用", "revoke", "停用") if user["active"] else ("停用", "restore", "恢复")
         confirm = 'data-confirm="停用该订阅链接？"' if action == "revoke" else ""
         count, latest = records.get(user.get("usage_key", user["token"]), (0, None))
         last_request = usage.display_time(latest) if latest is not None else "暂无请求"
         agent_html = (
-            f'<button type="button" data-agents="{folder}" data-email="{email}">查看 {count} 条 UA</button>'
+            f'<button type="button" data-agents="{escape(user_id(user), quote=True)}" data-email="{email}">查看 {count} 条 UA</button>'
             if count else "—"
         )
         rows.append(f"""<tr data-state="{'live' if user['active'] else 'revoked'}">
@@ -217,6 +217,7 @@ def subscriber_list(version, users, query="", page_number=1):
 <button type="button" data-copy="{url}" {'' if user['active'] else 'disabled'}>复制链接</button>
 <form method="post" action="/panel/state">{fields(version)}{context}
 <input type="hidden" name="folder" value="{folder}">
+<input type="hidden" name="id" value="{escape(user_id(user), quote=True)}">
 <button name="action" value="{action}" class="{action}" {confirm}>{button}</button>
 </form></div></td></tr>""")
     def page_link(label, target, enabled):
@@ -247,13 +248,14 @@ def subscriber_list(version, users, query="", page_number=1):
 def subscriber_form(version, user=None, draft=None):
     values = draft or user or {}
     original = escape(user["folder"] if user else "", quote=True)
+    identity = escape(user_id(user) if user else "", quote=True)
     email = escape(values.get("email", ""), quote=True)
     credential = escape(values.get("uuid", ""), quote=True)
     token = escape(values.get("token", ""), quote=True)
     hint = "<p>修改邮箱前缀会改变订阅路径。修改 UUID 会更新当前链接的配置。</p>" if user else ""
     return f"""{hint}<form class="form" method="post" action="/panel/subscriber">
-{fields(version)}<input type="hidden" name="folder" value="{original}">
-<label>邮箱 <input name="email" value="{email}" maxlength="254" required></label>
+{fields(version)}<input type="hidden" name="folder" value="{original}"><input type="hidden" name="id" value="{identity}">
+<label>邮箱 / 名称 <input name="email" value="{email}" maxlength="254" required></label>
 <label>UUID <input name="uuid" value="{credential}" maxlength="36" required></label>
 <label for="subscriber-token">自定义令牌</label>
 <div class="token-input"><input id="subscriber-token" name="token" value="{token}" minlength="32" maxlength="255"
@@ -327,7 +329,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.path == "/panel/user-agents":
             parameters = parse_qs(path.query)
             folder = parameters.get("folder", [""])[0]
-            user = next((u for u in users if u["folder"] == folder), None)
+            user = find_user(users, parameters.get("id", [""])[0], folder)
             if not user:
                 return self.respond(404)
             result = usage.page(user.get("usage_key", user["token"]), parameters.get("q", [""])[0], parameters.get("page", ["1"])[0])
@@ -336,8 +338,8 @@ class Handler(BaseHTTPRequestHandler):
         if path.path == "/panel/new":
             return self.page("新增订阅", subscriber_form(version))
         if path.path == "/panel/edit":
-            folder = parse_qs(path.query).get("folder", [""])[0]
-            user = next((u for u in users if u["folder"] == folder), None)
+            parameters = parse_qs(path.query)
+            user = find_user(users, parameters.get("id", [""])[0], parameters.get("folder", [""])[0])
             if not user:
                 return self.respond(404)
             return self.page("编辑订阅", subscriber_form(version, user))
@@ -362,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(400)
             form = {key: values[0] for key, values in parse_qs(
                 self.rfile.read(size).decode("utf-8"), keep_blank_values=True,
-                strict_parsing=True, max_num_fields=6).items()}
+                strict_parsing=True, max_num_fields=7).items()}
         except ValueError:
             return self.respond(400)
         token = form.get("csrf", "")
@@ -372,7 +374,8 @@ class Handler(BaseHTTPRequestHandler):
         if form.get("version") != version:
             return self.page("请重新打开表单", "<p>订阅数据已更新，请从面板重新进入。</p>", 409)
         folder = form.get("folder", "")
-        user = next((u for u in users if u["folder"] == folder), None)
+        identity = form.get("id", "")
+        user = find_user(users, identity, folder)
         if self.path == "/panel/user-agents/delete":
             if user is None or "user_agent" not in form:
                 return self.respond(400)
@@ -394,18 +397,15 @@ class Handler(BaseHTTPRequestHandler):
                 new_folder = folder_for(email)
                 supplied_token = form.get("token", user["token"] if user else "").strip()
                 new_token = canonical_token(supplied_token) if supplied_token else secrets.token_hex(32)
-                if folder and not user:
+                if (identity or folder) and not user:
                     return self.respond(404)
-                if any(u is not user and u["folder"].casefold() == new_folder.casefold() for u in users):
-                    raise InputError("目录名与其他订阅重复")
-                if any(u is not user and u["uuid"].lower() == credential for u in users):
-                    raise InputError("该 UUID 已有订阅")
                 if any(u is not user and new_token in {u["token"], u.get("usage_key")} for u in users):
                     raise InputError("该令牌已被其他订阅使用")
                 if not user:
-                    user = dict(token=new_token, active=True)
+                    user = dict(id=new_token, token=new_token, active=True)
                     users.append(user)
                 elif new_token != user["token"]:
+                    user.setdefault("id", user_id(user))
                     user.setdefault("usage_key", user["token"])
                 user.update(email=email, folder=new_folder, uuid=credential, token=new_token)
                 notice = "saved"

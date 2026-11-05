@@ -26,6 +26,7 @@ server {
         add_header X-Content-Type-Options nosniff always;
     }
 
+@@LEGACY_ROUTES@@
     location = /_clash_request {
         internal;
         proxy_method GET;

@@ -54,7 +54,7 @@ docker compose up -d --wait --wait-timeout 60
    install -d -o 10001 -g 33 -m 750 /opt/clash-subscriptions/runtime
    ```
 
-3. 将带 `{{UUID}}` 的模板保存为私密的 `imports/template.yaml`，将名单保存为 `imports/users.csv`。CSV 表头为 `email,uuid`，目录名使用邮箱 `@` 前的部分加 `.yaml`，重复目录或 UUID 会被拒绝。
+3. 将带 `{{UUID}}` 的模板保存为私密的 `imports/template.yaml`，将名单保存为 `imports/users.csv`。CSV 表头为 `email,uuid` 或 `email,uuid,token`，目录名使用邮箱 `@` 前的部分加 `.yaml`，令牌必须唯一，同名文件和相同 UUID 可以拥有多条独立订阅。
 
    `imports` 和文件应由实例运行用户拥有，目录权限 700，文件权限 600。
 
@@ -81,6 +81,12 @@ docker compose up -d --wait --wait-timeout 60
 每个域名使用独立的 Compose 项目名、`.env`、数据目录、运行目录、证书和管理员口令文件。同一镜像可以运行多个实例，各自维护模板、邮箱、UUID、令牌和 UA 数据。
 
 为第二套实例复制 `compose.yaml` 和 `.env.example` 到新目录，设置不同的 `COMPOSE_PROJECT_NAME`，再按首次部署步骤初始化。第二个站点的 Nginx 配置必须指向第二套数据与 socket 路径。
+
+## 旧 Gist 订阅迁移
+
+初始化工具同时支持表头为 `Gist ID,UUID,备注,哈希值` 的 CSV。此格式将 Gist ID 原样作为订阅令牌，`备注` 必须填写原来的 YAML 文件名。相同文件名和 UUID 的多条记录按独立订阅 ID 管理。
+
+渲染该站点的 Nginx 配置时增加 `--legacy-owner YOUR_GITHUB_USERNAME`，即可同时接受 `/<token>/raw/<filename>` 和 `/<owner>/<token>/raw/<filename>`。面板生成的标准地址仍为 `/<token>/<filename>`。
 
 ## 现有数据迁移
 

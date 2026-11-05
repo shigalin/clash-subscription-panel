@@ -47,6 +47,17 @@ def canonical_token(value):
     return token
 
 
+def user_id(user):
+    return user.get("id", user.get("usage_key", user["token"]))
+
+
+def find_user(users, identity="", folder=""):
+    if identity:
+        return next((user for user in users if user_id(user) == identity), None)
+    matches = [user for user in users if user["folder"] == folder]
+    return matches[0] if len(matches) == 1 else None
+
+
 def subscription(user):
     return f"{ORIGIN}/{user['token']}/{quote(user['folder'], safe='+')}"
 
@@ -86,7 +97,7 @@ def publish(users, template):
     previous = os.readlink(current) if current.is_symlink() else None
 
     def directory(path):
-        path.mkdir()
+        path.mkdir(exist_ok=True)
         os.chown(path, -1, group)
         path.chmod(0o750)
 

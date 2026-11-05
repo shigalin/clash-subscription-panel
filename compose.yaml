@@ -1,0 +1,31 @@
+services:
+  panel:
+    image: ${IMAGE:-ghcr.io/shigalin/clash-subscription-panel:latest}
+    user: "${APP_UID:-10001}:${APP_GID:-10001}"
+    group_add:
+      - "${WEB_GID:-33}"
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set PUBLIC_ORIGIN in .env}
+      DATA_DIR: /data
+      PANEL_SOCKET: /run/panel/panel.sock
+      WEB_GID: ${WEB_GID:-33}
+    volumes:
+      - type: bind
+        source: ${DATA_DIR:?Set DATA_DIR in .env}
+        target: /data
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${RUNTIME_DIR:?Set RUNTIME_DIR in .env}
+        target: /run/panel
+        bind:
+          create_host_path: false
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,nosuid,noexec,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    network_mode: none

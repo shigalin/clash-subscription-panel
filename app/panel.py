@@ -405,7 +405,7 @@ class Handler(BaseHTTPRequestHandler):
             if rule:
                 if item_state(rule) != "live":
                     return self.respond(404)
-                return self.respond(200, headers={"X-Accel-Redirect": "/_clash_forward/" + rule["id"]})
+                return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": "/_clash_forward/" + rule["id"]})
             user = find_subscription(users, request_path, self.headers.get("X-Legacy-Owner", ""))
             if not user:
                 return self.respond(404)
@@ -417,7 +417,7 @@ class Handler(BaseHTTPRequestHandler):
             })
             if item_state(user) != "live":
                 return self.respond(404)
-            return self.respond(200, headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
+            return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
         if path.path not in {"/panel/", "/panel/new", "/panel/edit", "/panel/template", "/panel/export", "/panel/user-agents", "/panel/forwards", "/panel/forwards/new", "/panel/forwards/edit"}:
             return self.respond(404)
         version, users, template = read()

@@ -35,13 +35,15 @@ const notices = {
   template: '模板保存成功，全部订阅已更新',
   revoked: '订阅已停用',
   restored: '订阅已恢复',
+  deleted: '订阅已删除，链接已失效',
+  deleted_history_retained: '订阅已删除，链接已失效，但 UA 记录清理失败，请联系管理员处理',
   forward_saved: '特殊转发保存成功',
   forward_deleted: '特殊转发已删除'
 };
 const query = new URLSearchParams(location.search);
 const initialNotice = notices[query.get('notice')];
 if (initialNotice) {
-  showToast(initialNotice);
+  showToast(initialNotice, query.get('notice') === 'deleted_history_retained');
   query.delete('notice');
   const suffix = query.toString();
   history.replaceState(null, '', location.pathname + (suffix ? '?' + suffix : ''));
@@ -244,6 +246,10 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <input type="hidden" name="folder" value="{folder}">
 <input type="hidden" name="id" value="{escape(user_id(user), quote=True)}">
 <button name="action" value="{action}" class="{action}" {confirm}>{button}</button>
+</form>
+<form method="post" action="/panel/subscriber/delete">{fields(version)}{context}
+<input type="hidden" name="id" value="{escape(user_id(user), quote=True)}">
+<button type="submit" class="revoke" data-confirm="删除订阅 {email}？链接会立即失效，并清除该订阅的 UA 记录。此操作无法在面板中撤销。">删除</button>
 </form></div></td></tr>""")
     def page_link(label, target, enabled):
         if not enabled:
@@ -460,7 +466,7 @@ class Handler(BaseHTTPRequestHandler):
                      disposition='attachment; filename="clash-subscriptions.tsv"')
 
     def do_POST(self):
-        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/template", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete"}:
+        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/template", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete"}:
             return self.respond(404)
         if self.headers.get("Origin") != ORIGIN:
             return self.respond(403)
@@ -513,6 +519,11 @@ class Handler(BaseHTTPRequestHandler):
                         rules.append(rule)
                     rule.update(path=source, target=target, active=form["active"] == "1", expires_at=expires_at)
                     notice = "forward_saved"
+            elif self.path == "/panel/subscriber/delete":
+                if not identity or not user:
+                    return self.respond(404)
+                users.remove(user)
+                notice = "deleted"
             elif self.path == "/panel/state":
                 action = form.get("action")
                 if not user or action not in {"revoke", "restore"}:
@@ -553,8 +564,15 @@ class Handler(BaseHTTPRequestHandler):
             return self.page("编辑订阅" if user else "新增订阅", subscriber_form(version, user, form), 400, str(exc))
         except OSError:
             return self.page("保存失败", "<p>请稍后重试。</p>", 500)
+        if self.path == "/panel/subscriber/delete":
+            # Revocation commits before analytics cleanup, so a cleanup failure
+            # cannot leave the deleted subscription accessible.
+            try:
+                usage.delete_subscription(user.get("usage_key", user["token"]))
+            except sqlite3.Error:
+                notice = "deleted_history_retained"
         destination = {"notice": notice}
-        if self.path == "/panel/state":
+        if self.path in {"/panel/state", "/panel/subscriber/delete"}:
             destination.update(q=form.get("q", ""), page=form.get("page", "1"), sort=form.get("sort", ""), direction=form.get("direction", "asc"))
         base = "/panel/forwards" if self.path.startswith("/panel/forwards/") else "/panel/"
         self.respond(303, location=base + "?" + urlencode(destination))

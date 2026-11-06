@@ -123,6 +123,12 @@ def delete(key, agent):
             connection.execute("DELETE FROM clients WHERE token = ? AND user_agent = ?", (key, agent))
 
 
+def delete_subscription(key):
+    with closing(sqlite3.connect(DB)) as connection:
+        with connection:
+            connection.execute("DELETE FROM clients WHERE token = ?", (key,))
+
+
 def summary(key):
     with closing(sqlite3.connect(DB)) as connection:
         count, latest = connection.execute(

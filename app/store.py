@@ -1,12 +1,15 @@
 import json
+from datetime import datetime
+import ipaddress
 import os
 from pathlib import Path
 import re
 import secrets
 import shutil
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import uuid
 import yaml
+from zoneinfo import ZoneInfo
 
 BASE = Path(os.environ.get("DATA_DIR", "/data"))
 ORIGIN = os.environ["PUBLIC_ORIGIN"].rstrip("/")
@@ -15,6 +18,7 @@ FOLDER = re.compile(r"[A-Za-z0-9_+-][A-Za-z0-9_.+-]{0,199}[.]yaml")
 GENERATION = re.compile(r"gen-[a-f0-9]{32}")
 MARKER = "{{UUID}}"
 MAX_TEMPLATE_BYTES = 512 * 1024
+TIMEZONE = ZoneInfo("Asia/Taipei")
 
 
 class InputError(ValueError):
@@ -62,6 +66,77 @@ def subscription(user):
     return f"{ORIGIN}/{user['token']}/{quote(user['folder'], safe='+')}"
 
 
+def canonical_expiry(value):
+    if not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=TIMEZONE)
+        return parsed.astimezone(TIMEZONE).isoformat(timespec="seconds")
+    except ValueError:
+        raise InputError("到期时间格式不正确") from None
+
+
+def expiry_time(item):
+    value = item.get("expires_at")
+    return datetime.fromisoformat(value) if value else None
+
+
+def item_state(item, now=None):
+    if not item["active"]:
+        return "revoked"
+    expiry = expiry_time(item)
+    return "expired" if expiry and expiry <= (now or datetime.now(TIMEZONE)) else "live"
+
+
+def display_expiry(item, form=False):
+    expiry = expiry_time(item)
+    if not expiry:
+        return "" if form else "长期有效"
+    return expiry.astimezone(TIMEZONE).strftime("%Y-%m-%dT%H:%M" if form else "%Y-%m-%d %H:%M:%S")
+
+
+def canonical_forward(path, target):
+    path, target = path.strip(), target.strip()
+    parts = path.split("/")
+    if (not re.fullmatch(r"/[A-Za-z0-9._~+/-]{1,2047}", path)
+            or any(part in {"", ".", ".."} for part in parts[1:])
+            or parts[1] in {"panel", "internal", "health"} or parts[1].startswith("_")):
+        raise InputError("请求路径需以 / 开头，不含查询参数、空格、空目录或系统保留路径")
+    try:
+        parsed = urlsplit(target)
+        host = parsed.hostname or ""
+        if (len(target) > 4096 or not re.fullmatch(r"[\x21-\x7e]+", target)
+                or "\\" in target or parsed.scheme != "https" or parsed.username is not None
+                or parsed.password is not None or parsed.port not in {None, 443} or parsed.fragment
+                or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", host)
+                or "." not in host or host.endswith((".localhost", ".local"))):
+            raise ValueError
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            pass
+        else:
+            raise ValueError
+    except ValueError:
+        raise InputError("目标需为 HTTPS 域名地址，端口限 443，不支持登录凭据、IP 地址或片段") from None
+    return path, target, host
+
+
+def find_subscription(users, path, legacy_owner=""):
+    prefix = rf"(?:{re.escape(legacy_owner)}/)?" if legacy_owner else ""
+    patterns = [rf"/([A-Za-z0-9._~-]{{32,255}})/({FOLDER.pattern})"]
+    if legacy_owner:
+        patterns.append(rf"/{prefix}([A-Za-z0-9._~-]{{32,255}})/raw/({FOLDER.pattern})")
+    for pattern in patterns:
+        match = re.fullmatch(pattern, path)
+        if match:
+            token, folder = match.groups()
+            return next((u for u in users if u["token"] == token and u["folder"] == folder), None)
+    return None
+
+
 def validate_template(template):
     if len(template.encode("utf-8")) > MAX_TEMPLATE_BYTES:
         raise InputError("模板超过 512 KiB")
@@ -87,7 +162,18 @@ def read():
     return version, users, template
 
 
-def publish(users, template):
+def read_forwards(version=None):
+    if version is None:
+        if not (BASE / "current").is_symlink():
+            return []
+        version = os.readlink(BASE / "current")
+    if not GENERATION.fullmatch(version):
+        raise RuntimeError("Invalid subscription generation")
+    source = BASE / version / "forwards.json"
+    return json.loads(source.read_bytes()) if source.exists() else []
+
+
+def publish(users, template, forwards=None):
     """Build a complete private snapshot, then switch the HTTPS document root."""
     group = WEB_GID
     version = "gen-" + secrets.token_hex(16)
@@ -95,6 +181,8 @@ def publish(users, template):
     pending = BASE / (".next-" + version)
     current = BASE / "current"
     previous = os.readlink(current) if current.is_symlink() else None
+    if forwards is None:
+        forwards = read_forwards(previous) if previous else []
 
     def directory(path):
         path.mkdir(exist_ok=True)
@@ -104,6 +192,7 @@ def publish(users, template):
     directory(stage)
     try:
         (stage / "users.json").write_text(json.dumps(users, ensure_ascii=False), encoding="utf-8")
+        (stage / "forwards.json").write_text(json.dumps(forwards, ensure_ascii=False), encoding="utf-8")
         (stage / "template.yaml").write_bytes(template.encode("utf-8"))
         directory(stage / "live")
         (stage / "revoked").mkdir()

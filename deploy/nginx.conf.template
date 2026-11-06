@@ -10,12 +10,8 @@ server {
     open_file_cache off;
     etag off;
 
-    location ~ "^/(?<token>[A-Za-z0-9._~-]{32,255})/(?<folder>[A-Za-z0-9_+-][A-Za-z0-9_.+-]{0,199}[.]yaml)$" {
-        set $usage_token $token;
-        set $usage_folder $folder;
-        set $usage_method $request_method;
-        mirror /_clash_request;
-        mirror_request_body off;
+    location ~ "^/_clash_file/(?<token>[A-Za-z0-9._~-]{32,255})/(?<folder>[A-Za-z0-9_+-][A-Za-z0-9_.+-]{0,199}[.]yaml)$" {
+        internal;
         alias @@DATA_DIR@@/current/live/$folder/$token/clash.yaml;
         limit_except GET { deny all; }
         types { }
@@ -26,23 +22,53 @@ server {
         add_header X-Content-Type-Options nosniff always;
     }
 
-@@LEGACY_ROUTES@@
-    location = /_clash_request {
+    location ~ "^/_clash_forward/(?<forward_id>[a-f0-9]{32})$" {
+        internal;
+        auth_request /_clash_forward_lookup;
+        auth_request_set $forward_target $upstream_http_x_clash_target;
+        auth_request_set $forward_host $upstream_http_x_clash_host;
+        resolver 127.0.0.53 valid=300s ipv6=off;
+        resolver_timeout 5s;
+        proxy_pass $forward_target;
+        proxy_ssl_server_name on;
+        proxy_ssl_name $forward_host;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 5;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_pass_request_headers off;
+        proxy_pass_request_body off;
+        proxy_set_header Host $forward_host;
+        proxy_set_header User-Agent "Clash-Subscription-Proxy";
+        proxy_set_header Content-Length "";
+        proxy_connect_timeout 10s;
+        proxy_read_timeout 30s;
+        proxy_cache off;
+        proxy_max_temp_file_size 0;
+        proxy_intercept_errors on;
+        error_page 301 302 303 307 308 =502 /_clash_forward_error;
+        proxy_hide_header Location;
+        proxy_hide_header Cache-Control;
+        proxy_hide_header Expires;
+        proxy_hide_header Content-Disposition;
+        proxy_hide_header Set-Cookie;
+        add_header Cache-Control "private, no-store" always;
+        add_header Content-Disposition inline;
+        add_header X-Content-Type-Options nosniff always;
+    }
+
+    location = /_clash_forward_lookup {
         internal;
         proxy_method GET;
         proxy_pass_request_body off;
         proxy_pass_request_headers off;
         proxy_set_header Content-Length "";
-        proxy_set_header X-Usage-Token $usage_token;
-        proxy_set_header X-Usage-Folder $usage_folder;
-        proxy_set_header X-Usage-Method $usage_method;
-        proxy_set_header X-Usage-Time $msec;
-        proxy_set_header X-Usage-Agent $http_user_agent;
+        proxy_set_header X-Forward-Id $forward_id;
         proxy_connect_timeout 1s;
         proxy_read_timeout 15s;
-        proxy_pass http://unix:@@RUNTIME_DIR@@/panel.sock:/internal/track;
+        proxy_pass http://unix:@@RUNTIME_DIR@@/panel.sock:/internal/forward;
     }
 
+    location = /_clash_forward_error { internal; return 502; }
     location = /panel { return 308 /panel/; }
 
     location ^~ /panel/ {
@@ -53,5 +79,19 @@ server {
         proxy_pass http://unix:@@RUNTIME_DIR@@/panel.sock;
     }
 
-    location / { return 404; }
+    location / {
+        limit_except GET { deny all; }
+        set $subscription_resolver /internal/resolve;
+        proxy_pass_request_body off;
+        proxy_pass_request_headers off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Request-Path $uri;
+        proxy_set_header X-Request-Method $request_method;
+        proxy_set_header X-Request-Time $msec;
+        proxy_set_header X-Request-Agent $http_user_agent;
+        proxy_set_header X-Legacy-Owner "@@LEGACY_OWNER@@";
+        proxy_connect_timeout 1s;
+        proxy_read_timeout 15s;
+        proxy_pass http://unix:@@RUNTIME_DIR@@/panel.sock:$subscription_resolver;
+    }
 }

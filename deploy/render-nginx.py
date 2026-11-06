@@ -18,15 +18,7 @@ for key, value in values.items():
     if key != "domain" and not re.fullmatch(r"/[A-Za-z0-9_./-]+", value):
         parser.error("Use absolute paths containing letters, digits, slash, dot, hyphen or underscore")
 template = Path(__file__).with_name("nginx.conf.template").read_text()
-legacy = ""
-if owner:
-    start = template.index('    location ~ "^/(?<token>')
-    end = template.index("\n    }", start) + len("\n    }")
-    block = template[start:end]
-    prefix = "^/(?<token>"
-    legacy = block.replace(prefix, "^/(?:" + owner + "/)?(?<token>", 1)
-    legacy = legacy.replace(')/(?<folder>', ')/raw/(?<folder>', 1) + "\n\n"
-template = template.replace("@@LEGACY_ROUTES@@", legacy)
+template = template.replace("@@LEGACY_OWNER@@", owner)
 for key, value in values.items():
     template = template.replace("@@" + key.upper() + "@@", value)
 if "@@" in template:

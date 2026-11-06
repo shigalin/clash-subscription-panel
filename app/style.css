@@ -1,6 +1,6 @@
 
 *{box-sizing:border-box}body{margin:0;background:#f4f6f8;color:#162437;font:15px system-ui,sans-serif}
-main{max-width:1050px;margin:0 auto;padding:32px 20px}h1{font-size:27px;margin:0 0 8px}
+main{max-width:1440px;margin:0 auto;padding:32px 20px}h1{font-size:27px;margin:0 0 8px}
 p{color:#465569;margin:0 0 20px}.toolbar{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:12px}
 input[type=search]{min-width:240px;padding:9px 10px;border:1px solid #a7b3c1;border-radius:6px;background:#fff}
 .grid{overflow:auto;border:1px solid #d7dfe7;border-radius:9px;background:#fff}
@@ -41,3 +41,8 @@ textarea{min-height:65vh;font:14px monospace;resize:vertical;white-space:pre;ove
 
 #ua-feedback:empty{display:none}#ua-feedback{color:#145c36;margin:8px 0}
 #ua-list .delete-agent{display:block;margin:10px 0 0 auto;color:#9b2525}
+
+[data-state=expired] .badge{background:#fff0ce;color:#805400}
+th a{color:inherit;text-decoration:none}th a:hover{text-decoration:underline}
+.form select{padding:8px;border:1px solid #a7b3c1;border-radius:5px;background:#fff}
+.forwards .forward-path,.forwards .forward-target{white-space:normal;overflow-wrap:anywhere;min-width:210px;max-width:340px}

@@ -36,7 +36,7 @@ const notices = {
   revoked: '订阅已停用',
   restored: '订阅已恢复',
   deleted: '订阅已删除，链接已失效',
-  deleted_history_retained: '订阅已删除，链接已失效，但 UA 记录清理失败，请联系管理员处理',
+  deleted_history_retained: '订阅已删除，链接已失效，但请求记录清理失败，请联系管理员处理',
   forward_saved: '特殊转发保存成功',
   forward_deleted: '特殊转发已删除'
 };
@@ -182,6 +182,7 @@ STATE_LABELS = {"live": "启用", "expired": "已到期", "revoked": "停用"}
 def subscriber_list(version, users, query="", page_number=1, sort="", direction="asc"):
     rows = []
     records = usage.summaries()
+    update_totals = usage.update_totals()
     states = {user_id(u): item_state(u) for u in users}
     active = sum(state == "live" for state in states.values())
     expired = sum(state == "expired" for state in states.values())
@@ -230,7 +231,9 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         label = STATE_LABELS[state]
         action, button = ("revoke", "停用") if user["active"] else ("restore", "恢复")
         confirm = 'data-confirm="停用该订阅链接？"' if action == "revoke" else ""
-        count, latest = records.get(user.get("usage_key", user["token"]), (0, None))
+        usage_key = user.get("usage_key", user["token"])
+        count, latest = records.get(usage_key, (0, None))
+        updates = update_totals.get(usage_key, 0)
         last_request = usage.display_time(latest) if latest is not None else "暂无请求"
         agent_html = (
             f'<button type="button" data-agents="{escape(user_id(user), quote=True)}" data-email="{email}">查看 {count} 条 UA</button>'
@@ -239,7 +242,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         rows.append(f"""<tr data-state="{state}">
 <td>{email}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
 <td>{display_expiry(user)}</td>
-<td class="last-request">{last_request}</td><td>{agent_html}</td>
+<td class="last-request">{last_request}</td><td class="update-count">{updates}</td><td>{agent_html}</td>
 <td><div class="actions"><a class="button-link" href="{escape(edit, quote=True)}">编辑</a>
 <button type="button" data-copy="{url}" {'' if user['active'] else 'disabled'}>复制链接</button>
 <form method="post" action="/panel/state">{fields(version)}{context}
@@ -249,7 +252,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 </form>
 <form method="post" action="/panel/subscriber/delete">{fields(version)}{context}
 <input type="hidden" name="id" value="{escape(user_id(user), quote=True)}">
-<button type="submit" class="revoke" data-confirm="删除订阅 {email}？链接会立即失效，并清除该订阅的 UA 记录。此操作无法在面板中撤销。">删除</button>
+<button type="submit" class="revoke" data-confirm="删除订阅 {email}？链接会立即失效，并清除该订阅的 UA 记录和更新次数。此操作无法在面板中撤销。">删除</button>
 </form></div></td></tr>""")
     def page_link(label, target, enabled):
         if not enabled:
@@ -269,7 +272,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         url = "/panel/?" + urlencode({"q": query, "sort": key, "direction": next_direction})
         arrow = (" ↑" if direction == "asc" else " ↓") if selected else " ↕"
         return f'<a href="{escape(url, quote=True)}">{label}{arrow}</a>'
-    empty = '<tr><td colspan="7">未找到匹配的订阅</td></tr>'
+    empty = '<tr><td colspan="8">未找到匹配的订阅</td></tr>'
     return f"""<p>共 <strong>{len(users)}</strong> 条订阅 · {active} 条启用 · {expired} 条已到期 · {len(users)-active-expired} 条停用</p>
 <form class="toolbar" method="get" action="/panel/" role="search">
 <input type="hidden" name="sort" value="{sort}"><input type="hidden" name="direction" value="{direction}">
@@ -278,7 +281,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <button type="submit">搜索</button><a href="/panel/">清除搜索</a>
 </form>
 <p id="page-status">第 {page_number} / {page_count} 页 · 共 {len(matches)} 条结果 · 每页最多 100 条</p>
-<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th>User-Agent</th><th>操作</th></tr></thead>
+<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="自功能上线起累计通过校验的 GET 订阅请求">更新总次数</th><th>User-Agent</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or empty}</tbody></table></div>
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 
@@ -409,13 +412,14 @@ class Handler(BaseHTTPRequestHandler):
             user = find_subscription(users, request_path, self.headers.get("X-Legacy-Owner", ""))
             if not user:
                 return self.respond(404)
+            state = item_state(user)
             usage.record({
                 "X-Usage-Token": user["token"], "X-Usage-Folder": user["folder"],
                 "X-Usage-Method": self.headers.get("X-Request-Method", ""),
                 "X-Usage-Time": self.headers.get("X-Request-Time", ""),
                 "X-Usage-Agent": self.headers.get("X-Request-Agent", ""),
-            })
-            if item_state(user) != "live":
+            }, count_update=state == "live")
+            if state != "live":
                 return self.respond(404)
             return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
         if path.path not in {"/panel/", "/panel/new", "/panel/edit", "/panel/template", "/panel/export", "/panel/user-agents", "/panel/forwards", "/panel/forwards/new", "/panel/forwards/edit"}:

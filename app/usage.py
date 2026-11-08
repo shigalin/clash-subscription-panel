@@ -27,12 +27,19 @@ def initialize():
         ) WITHOUT ROWID
     """)
     _connection.execute("CREATE INDEX IF NOT EXISTS client_recent ON clients (token, last_seen DESC)")
+    _connection.execute("""
+        CREATE TABLE IF NOT EXISTS subscription_updates (
+            token TEXT PRIMARY KEY,
+            total INTEGER NOT NULL
+        ) WITHOUT ROWID
+    """)
     _connection.commit()
     DB.chmod(0o600)
 
 
-def record(headers):
-    if headers.get("X-Usage-Method") not in {"GET", "HEAD"}:
+def record(headers, *, count_update=False):
+    method = headers.get("X-Usage-Method")
+    if method not in {"GET", "HEAD"}:
         return
     token = headers.get("X-Usage-Token", "")
     folder = headers.get("X-Usage-Folder", "")
@@ -49,12 +56,17 @@ def record(headers):
         return
     # Exact User-Agent strings are unique within each subscription.
     user_agent = headers.get("X-Usage-Agent", "")
-    _connection.execute("""
-        INSERT INTO clients (token, user_agent, last_seen) VALUES (?, ?, ?)
-        ON CONFLICT (token, user_agent)
-        DO UPDATE SET last_seen = MAX(clients.last_seen, excluded.last_seen)
-    """, (key, user_agent, timestamp))
-    _connection.commit()
+    with _connection:
+        _connection.execute("""
+            INSERT INTO clients (token, user_agent, last_seen) VALUES (?, ?, ?)
+            ON CONFLICT (token, user_agent)
+            DO UPDATE SET last_seen = MAX(clients.last_seen, excluded.last_seen)
+        """, (key, user_agent, timestamp))
+        if count_update and method == "GET":
+            _connection.execute("""
+                INSERT INTO subscription_updates (token, total) VALUES (?, 1)
+                ON CONFLICT (token) DO UPDATE SET total = subscription_updates.total + 1
+            """, (key,))
 
 
 def by_subscription():
@@ -79,6 +91,11 @@ def summaries():
                 "SELECT token, COUNT(*), MAX(last_seen) FROM clients GROUP BY token"
             )
         }
+
+
+def update_totals():
+    with closing(sqlite3.connect(DB)) as connection:
+        return dict(connection.execute("SELECT token, total FROM subscription_updates"))
 
 
 def matching_tokens(query):
@@ -127,6 +144,7 @@ def delete_subscription(key):
     with closing(sqlite3.connect(DB)) as connection:
         with connection:
             connection.execute("DELETE FROM clients WHERE token = ?", (key,))
+            connection.execute("DELETE FROM subscription_updates WHERE token = ?", (key,))
 
 
 def summary(key):

@@ -3,6 +3,7 @@ from datetime import datetime
 import json
 import math
 import os
+import re
 import sqlite3
 import time
 from zoneinfo import ZoneInfo
@@ -12,6 +13,15 @@ from store import BASE
 DB = BASE / "usage.sqlite3"
 TIMEZONE = ZoneInfo("Asia/Taipei")
 _connection = None
+CLIENT_AGENT = re.compile(
+    r"^(?:clash|clash\.meta|clashmeta|clashforandroid|clashmetaforandroid|"
+    r"clashforwindows|clash-verge(?:-rev)?|mihomo|shadowrocket)(?=$|[/\s(])",
+    re.IGNORECASE,
+)
+BROWSER_AGENT = re.compile(
+    r"\s(?:chrome|chromium|crios|firefox|fxios|safari|edg|edga|edgios|edge|opr|samsungbrowser)/[0-9]",
+    re.IGNORECASE,
+)
 
 
 def initialize():
@@ -33,8 +43,24 @@ def initialize():
             total INTEGER NOT NULL
         ) WITHOUT ROWID
     """)
-    _connection.commit()
+    with _connection:
+        _connection.execute("BEGIN IMMEDIATE")
+        if not any(column[1] == "updates" for column in _connection.execute("PRAGMA table_info(clients)")):
+            _connection.execute("ALTER TABLE clients ADD COLUMN updates INTEGER NOT NULL DEFAULT 0")
+        columns = {column[1] for column in _connection.execute("PRAGMA table_info(subscription_updates)")}
+        for name in ("client", "browser", "other"):
+            if name not in columns:
+                _connection.execute(f"ALTER TABLE subscription_updates ADD COLUMN {name} INTEGER NOT NULL DEFAULT 0")
     DB.chmod(0o600)
+
+
+def classify_agent(user_agent):
+    agent = user_agent.strip()
+    if CLIENT_AGENT.match(agent):
+        return "client"
+    if agent.lower().startswith("mozilla/") and BROWSER_AGENT.search(agent):
+        return "browser"
+    return "other"
 
 
 def record(headers, *, count_update=False):
@@ -56,17 +82,25 @@ def record(headers, *, count_update=False):
         return
     # Exact User-Agent strings are unique within each subscription.
     user_agent = headers.get("X-Usage-Agent", "")
+    is_update = count_update and method == "GET"
     with _connection:
         _connection.execute("""
-            INSERT INTO clients (token, user_agent, last_seen) VALUES (?, ?, ?)
-            ON CONFLICT (token, user_agent)
-            DO UPDATE SET last_seen = MAX(clients.last_seen, excluded.last_seen)
-        """, (key, user_agent, timestamp))
-        if count_update and method == "GET":
+            INSERT INTO clients (token, user_agent, last_seen, updates) VALUES (?, ?, ?, ?)
+            ON CONFLICT (token, user_agent) DO UPDATE SET
+                last_seen = MAX(clients.last_seen, excluded.last_seen),
+                updates = clients.updates + excluded.updates
+        """, (key, user_agent, timestamp, is_update))
+        if is_update:
+            category = classify_agent(user_agent)
             _connection.execute("""
-                INSERT INTO subscription_updates (token, total) VALUES (?, 1)
-                ON CONFLICT (token) DO UPDATE SET total = subscription_updates.total + 1
-            """, (key,))
+                INSERT INTO subscription_updates (token, total, client, browser, other)
+                VALUES (?, 1, ?, ?, ?)
+                ON CONFLICT (token) DO UPDATE SET
+                    total = subscription_updates.total + 1,
+                    client = subscription_updates.client + excluded.client,
+                    browser = subscription_updates.browser + excluded.browser,
+                    other = subscription_updates.other + excluded.other
+            """, (key, category == "client", category == "browser", category == "other"))
 
 
 def by_subscription():
@@ -93,9 +127,14 @@ def summaries():
         }
 
 
-def update_totals():
+def update_counts():
     with closing(sqlite3.connect(DB)) as connection:
-        return dict(connection.execute("SELECT token, total FROM subscription_updates"))
+        return {
+            token: (total, client, browser, other)
+            for token, total, client, browser, other in connection.execute(
+                "SELECT token, total, client, browser, other FROM subscription_updates"
+            )
+        }
 
 
 def matching_tokens(query):
@@ -121,7 +160,7 @@ def page(token, query="", page_number=1):
         page_count = max(1, (total + 49) // 50)
         page_number = min(max(page_number, 1), page_count)
         records = connection.execute(
-            "SELECT user_agent, last_seen FROM clients WHERE " + condition
+            "SELECT user_agent, last_seen, updates FROM clients WHERE " + condition
             + " ORDER BY last_seen DESC, user_agent LIMIT 50 OFFSET ?",
             (token, query, (page_number - 1) * 50),
         ).fetchall()
@@ -129,8 +168,11 @@ def page(token, query="", page_number=1):
         "page": page_number,
         "pages": page_count,
         "total": total,
-        "items": [{"user_agent": agent or "未提供 User-Agent", "value": agent, "last_seen": display_time(timestamp)}
-                  for agent, timestamp in records],
+        "items": [
+            {"user_agent": agent or "未提供 User-Agent", "value": agent,
+             "last_seen": display_time(timestamp), "updates": updates, "category": classify_agent(agent)}
+            for agent, timestamp, updates in records
+        ],
     }
 
 

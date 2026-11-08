@@ -56,6 +56,7 @@ const agentPrev = document.getElementById('ua-prev');
 const agentNext = document.getElementById('ua-next');
 let agentId = '', agentPage = 1, agentRequest, agentSource, agentVersion, agentCsrf;
 const agentFeedback = document.getElementById('ua-feedback');
+const agentCategories = {client: '客户端', browser: '浏览器', other: '其他'};
 
 async function loadAgents(page = 1) {
   agentRequest?.abort();
@@ -83,7 +84,7 @@ async function loadAgents(page = 1) {
       value.className = 'agent-value';
       value.textContent = item.user_agent;
       const time = document.createElement('small');
-      time.textContent = '最近请求 ' + item.last_seen + '（北京时间）';
+      time.textContent = agentCategories[item.category] + ' · 更新 ' + item.updates + ' 次 · 最近请求 ' + item.last_seen + '（北京时间）';
       const remove = document.createElement('button');
       remove.type = 'button';
       remove.className = 'delete-agent';
@@ -163,7 +164,7 @@ document.addEventListener('submit', (event) => {
 AGENT_DIALOG = """
 <dialog id="ua-dialog" aria-labelledby="ua-title">
 <div class="ua-heading"><h2 id="ua-title">User-Agent 记录</h2><button type="button" id="ua-close" aria-label="关闭">关闭</button></div>
-<p id="ua-account"></p><p class="ua-help">按完整 User-Agent 去重，条数代表不同 UA 字符串。</p>
+<p id="ua-account"></p><p class="ua-help">按完整 User-Agent 去重。每条 UA 的更新次数从分类功能上线起累计。</p>
 <form id="ua-search-form" class="toolbar" role="search">
 <label for="ua-search">搜索 User-Agent</label><input type="search" id="ua-search"><button type="submit">搜索</button>
 </form><p id="ua-feedback" role="status" aria-live="polite"></p><p id="ua-status" role="status"></p><ul id="ua-list"></ul>
@@ -182,7 +183,7 @@ STATE_LABELS = {"live": "启用", "expired": "已到期", "revoked": "停用"}
 def subscriber_list(version, users, query="", page_number=1, sort="", direction="asc"):
     rows = []
     records = usage.summaries()
-    update_totals = usage.update_totals()
+    update_counts = usage.update_counts()
     states = {user_id(u): item_state(u) for u in users}
     active = sum(state == "live" for state in states.values())
     expired = sum(state == "expired" for state in states.values())
@@ -233,7 +234,9 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         confirm = 'data-confirm="停用该订阅链接？"' if action == "revoke" else ""
         usage_key = user.get("usage_key", user["token"])
         count, latest = records.get(usage_key, (0, None))
-        updates = update_totals.get(usage_key, 0)
+        updates, client_updates, browser_visits, other_requests = update_counts.get(usage_key, (0, 0, 0, 0))
+        unclassified = updates - client_updates - browser_visits - other_requests
+        old_updates = f'<small class="update-history">旧版未分类 {unclassified}</small>' if unclassified > 0 else ""
         last_request = usage.display_time(latest) if latest is not None else "暂无请求"
         agent_html = (
             f'<button type="button" data-agents="{escape(user_id(user), quote=True)}" data-email="{email}">查看 {count} 条 UA</button>'
@@ -242,7 +245,10 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         rows.append(f"""<tr data-state="{state}">
 <td>{email}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
 <td>{display_expiry(user)}</td>
-<td class="last-request">{last_request}</td><td class="update-count">{updates}</td><td>{agent_html}</td>
+<td class="last-request">{last_request}</td>
+<td class="update-count"><strong>{updates}</strong>{old_updates}
+<small class="update-breakdown"><span title="Clash、Mihomo 和 Shadowrocket">客户端更新 {client_updates}</span> · 浏览器访问 {browser_visits} · 其他 {other_requests}</small></td>
+<td>{agent_html}</td>
 <td><div class="actions"><a class="button-link" href="{escape(edit, quote=True)}">编辑</a>
 <button type="button" data-copy="{url}" {'' if user['active'] else 'disabled'}>复制链接</button>
 <form method="post" action="/panel/state">{fields(version)}{context}
@@ -281,7 +287,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <button type="submit">搜索</button><a href="/panel/">清除搜索</a>
 </form>
 <p id="page-status">第 {page_number} / {page_count} 页 · 共 {len(matches)} 条结果 · 每页最多 100 条</p>
-<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="自功能上线起累计通过校验的 GET 订阅请求">更新总次数</th><th>User-Agent</th><th>操作</th></tr></thead>
+<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="累计通过校验的 GET 订阅请求，包含旧版未分类次数">更新总次数</th><th>User-Agent</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or empty}</tbody></table></div>
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 

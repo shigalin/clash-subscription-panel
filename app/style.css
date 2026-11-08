@@ -7,7 +7,9 @@ input[type=search]{min-width:240px;padding:9px 10px;border:1px solid #a7b3c1;bor
 table{width:100%;border-collapse:collapse;white-space:nowrap}th,td{padding:11px 14px;text-align:left;border-bottom:1px solid #e5ebf1}
 th{background:#eaf0f6;font-weight:650}tr:last-child td{border-bottom:0}
 .update-breakdown,.update-history{color:#465569;font-size:12px}
-.update-breakdown{display:block}.update-history{margin-left:8px}
+.update-summary{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-bottom:3px}
+.update-summary button{padding:3px 8px;font-size:12px}
+.update-breakdown{display:block}
 .badge{background:#dff3e7;color:#165a36;padding:3px 8px;border-radius:10px}
 [data-state=revoked] .badge{background:#edf0f3;color:#414c5d}
 .actions{display:flex;gap:8px}button{background:#fff;border:1px solid #aab8c7;padding:6px 10px;border-radius:5px;color:#172b43;cursor:pointer}

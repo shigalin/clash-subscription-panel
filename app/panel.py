@@ -240,15 +240,14 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         last_request = usage.display_time(latest) if latest is not None else "暂无请求"
         agent_html = (
             f'<button type="button" data-agents="{escape(user_id(user), quote=True)}" data-email="{email}">查看 {count} 条 UA</button>'
-            if count else "—"
+            if count else ""
         )
         rows.append(f"""<tr data-state="{state}">
 <td>{email}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
 <td>{display_expiry(user)}</td>
 <td class="last-request">{last_request}</td>
-<td class="update-count"><strong>{updates}</strong>{old_updates}
+<td class="update-count"><div class="update-summary"><strong>{updates}</strong>{old_updates}{agent_html}</div>
 <small class="update-breakdown"><span title="Clash、Mihomo 和 Shadowrocket">客户端更新 {client_updates}</span> · 浏览器访问 {browser_visits} · 其他 {other_requests}</small></td>
-<td>{agent_html}</td>
 <td><div class="actions"><a class="button-link" href="{escape(edit, quote=True)}">编辑</a>
 <button type="button" data-copy="{url}" {'' if user['active'] else 'disabled'}>复制链接</button>
 <form method="post" action="/panel/state">{fields(version)}{context}
@@ -278,7 +277,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         url = "/panel/?" + urlencode({"q": query, "sort": key, "direction": next_direction})
         arrow = (" ↑" if direction == "asc" else " ↓") if selected else " ↕"
         return f'<a href="{escape(url, quote=True)}">{label}{arrow}</a>'
-    empty = '<tr><td colspan="8">未找到匹配的订阅</td></tr>'
+    empty = '<tr><td colspan="7">未找到匹配的订阅</td></tr>'
     return f"""<p>共 <strong>{len(users)}</strong> 条订阅 · {active} 条启用 · {expired} 条已到期 · {len(users)-active-expired} 条停用</p>
 <form class="toolbar" method="get" action="/panel/" role="search">
 <input type="hidden" name="sort" value="{sort}"><input type="hidden" name="direction" value="{direction}">
@@ -287,7 +286,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <button type="submit">搜索</button><a href="/panel/">清除搜索</a>
 </form>
 <p id="page-status">第 {page_number} / {page_count} 页 · 共 {len(matches)} 条结果 · 每页最多 100 条</p>
-<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="累计通过校验的 GET 订阅请求，包含旧版未分类次数">更新总次数</th><th>User-Agent</th><th>操作</th></tr></thead>
+<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="累计通过校验的 GET 订阅请求，包含旧版未分类次数">更新总次数 / User-Agent</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or empty}</tbody></table></div>
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 

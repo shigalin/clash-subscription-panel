@@ -20,6 +20,11 @@ nav{display:flex;flex-wrap:wrap;gap:14px;margin:0 0 20px}a{color:#174c80}nav a,.
 .form{display:grid;gap:12px;background:#fff;border:1px solid #d7dfe7;border-radius:9px;padding:18px}.form label{display:grid;gap:5px}
 .form input:not([type=hidden]),textarea{width:100%;padding:8px;border:1px solid #a7b3c1;border-radius:5px}
 textarea{min-height:65vh;font:14px monospace;resize:vertical;white-space:pre;overflow:auto}
+.personalized-config{margin-top:16px}
+.personalized-config summary{cursor:pointer;color:#174c80;font-weight:600}
+.personalized-config[open] summary{margin-bottom:8px}
+.personalized-config textarea{min-height:18rem}
+.profile-kind{margin-left:8px;padding:2px 6px;border-radius:5px;background:#e8f1fb;color:#174c80;font-size:12px}
 .error{padding:10px;background:#fbe4e4;color:#832323}td .button-link{padding:5px 10px}
 
 #toast{position:fixed;right:24px;bottom:24px;z-index:20;max-width:calc(100vw - 48px);padding:13px 20px;border-radius:8px;background:#145c36;color:white;box-shadow:0 5px 20px #0003}

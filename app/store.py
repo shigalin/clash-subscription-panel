@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -137,10 +138,10 @@ def find_subscription(users, path, legacy_owner=""):
     return None
 
 
-def validate_template(template):
+def validate_template(template, *, require_marker=True):
     if len(template.encode("utf-8")) > MAX_TEMPLATE_BYTES:
         raise InputError("模板超过 512 KiB")
-    if MARKER not in template:
+    if require_marker and MARKER not in template:
         raise InputError("模板必须包含 {{UUID}}")
     try:
         config = yaml.safe_load(template.replace(MARKER, "00000000-0000-4000-8000-000000000000"))
@@ -173,7 +174,23 @@ def read_forwards(version=None):
     return json.loads(source.read_bytes()) if source.exists() else []
 
 
-def publish(users, template, forwards=None):
+def personalized_path(directory, user):
+    key = hashlib.sha256(user_id(user).encode("utf-8")).hexdigest()
+    return directory / "personalized" / (key + ".yaml")
+
+
+def read_personalized(version, user):
+    if version is None:
+        return ""
+    if not GENERATION.fullmatch(version):
+        raise RuntimeError("Invalid subscription generation")
+    try:
+        return personalized_path(BASE / version, user).read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def publish(users, template, forwards=None, *, overrides=None):
     """Build a complete private snapshot, then switch the HTTPS document root."""
     group = WEB_GID
     version = "gen-" + secrets.token_hex(16)
@@ -183,6 +200,7 @@ def publish(users, template, forwards=None):
     previous = os.readlink(current) if current.is_symlink() else None
     if forwards is None:
         forwards = read_forwards(previous) if previous else []
+    overrides = overrides or {}
 
     def directory(path):
         path.mkdir(exist_ok=True)
@@ -197,12 +215,19 @@ def publish(users, template, forwards=None):
         directory(stage / "live")
         (stage / "revoked").mkdir()
         for user in users:
+            identity = user_id(user)
+            custom = overrides[identity] if identity in overrides else read_personalized(previous, user)
+            if custom:
+                source = personalized_path(stage, user)
+                source.parent.mkdir(mode=0o700, exist_ok=True)
+                source.write_bytes(custom.encode("utf-8"))
+                source.chmod(0o600)
             status = "live" if user["active"] else "revoked"
             account = stage / status / user["folder"]
             directory(account)
             directory(account / user["token"])
             profile = account / user["token"] / "clash.yaml"
-            profile.write_bytes(template.replace(MARKER, user["uuid"]).encode("utf-8"))
+            profile.write_bytes((custom or template).replace(MARKER, user["uuid"]).encode("utf-8"))
             os.chown(profile, -1, group)
             profile.chmod(0o640)
         pending.symlink_to(version, target_is_directory=True)

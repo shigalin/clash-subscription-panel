@@ -6,6 +6,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 from urllib.parse import quote, urlsplit
 import uuid
 import yaml
@@ -18,6 +19,8 @@ FOLDER = re.compile(r"[A-Za-z0-9_+-][A-Za-z0-9_.+-]{0,199}[.]yaml")
 GENERATION = re.compile(r"gen-[a-f0-9]{32}")
 MARKER = "{{UUID}}"
 MAX_TEMPLATE_BYTES = 512 * 1024
+MAX_UA_RULES = 50
+MAX_UA_PATTERN = 256
 TIMEZONE = ZoneInfo("Asia/Taipei")
 ENHANCED_UA = re.compile(
     r"^(?P<product>[a-z][a-z0-9.-]*)/v?"
@@ -47,6 +50,34 @@ def supports_enhanced(agent):
 
 class InputError(ValueError):
     pass
+
+
+def validate_ua_pattern(pattern):
+    if not pattern.strip() or len(pattern) > MAX_UA_PATTERN or not pattern.isprintable():
+        raise InputError(f"正则需包含 1～{MAX_UA_PATTERN} 个可见字符")
+    try:
+        re.compile(pattern)
+    except (re.error, OverflowError, RecursionError):
+        raise InputError("正则表达式无效，请检查语法") from None
+
+
+def _ua_timeout(_signum, _frame):
+    raise TimeoutError("UA regex timed out")
+
+
+def match_ua_rule(rules, agent):
+    # Requests run on the main thread. Bound the whole match pass because
+    # Python's regular expressions can backtrack on client-controlled input.
+    if not rules:
+        return None
+    previous = signal.signal(signal.SIGALRM, _ua_timeout)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, 0.025)
+        return next((rule for rule in rules if rule["active"]
+                     and re.search(rule["pattern"], agent)), None)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
 
 
 def folder_for(email):
@@ -208,7 +239,18 @@ def read_enhanced(version):
         return ""
 
 
-def publish(users, template, forwards=None, *, enhanced=None):
+def read_ua_rules(version):
+    if version is None:
+        return []
+    if not GENERATION.fullmatch(version):
+        raise RuntimeError("Invalid subscription generation")
+    try:
+        return json.loads((BASE / version / "ua-rules.json").read_bytes())
+    except FileNotFoundError:
+        return []
+
+
+def publish(users, template, forwards=None, *, enhanced=None, ua_rules=None):
     """Build a complete private snapshot, then switch the HTTPS document root."""
     group = WEB_GID
     version = "gen-" + secrets.token_hex(16)
@@ -220,6 +262,8 @@ def publish(users, template, forwards=None, *, enhanced=None):
         forwards = read_forwards(previous) if previous else []
     if enhanced is None:
         enhanced = read_enhanced(previous)
+    if ua_rules is None:
+        ua_rules = read_ua_rules(previous)
 
     def directory(path):
         path.mkdir(exist_ok=True)
@@ -234,6 +278,10 @@ def publish(users, template, forwards=None, *, enhanced=None):
         if enhanced:
             source = stage / "enhanced.yaml"
             source.write_bytes(enhanced.encode("utf-8"))
+            source.chmod(0o600)
+        if ua_rules:
+            source = stage / "ua-rules.json"
+            source.write_text(json.dumps(ua_rules, ensure_ascii=False), encoding="utf-8")
             source.chmod(0o600)
         directory(stage / "live")
         (stage / "revoked").mkdir()

@@ -15,6 +15,7 @@ import usage
 
 from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, user_id, find_user, folder_for, publish, read, subscription, validate_template
 from store import MARKER, canonical_expiry, canonical_forward, display_expiry, expiry_time, item_state, read_forwards, read_enhanced, supports_enhanced, find_subscription
+from store import MAX_UA_PATTERN, MAX_UA_RULES, match_ua_rule, read_ua_rules, validate_ua_pattern
 
 SOCKET = Path(os.environ.get("PANEL_SOCKET", "/run/panel/panel.sock"))
 CSRF = secrets.token_urlsafe(32)
@@ -39,7 +40,10 @@ const notices = {
   deleted: '订阅已删除，链接已失效',
   deleted_history_retained: '订阅已删除，链接已失效，但请求记录清理失败，请联系管理员处理',
   forward_saved: '特殊转发保存成功',
-  forward_deleted: '特殊转发已删除'
+  forward_deleted: '特殊转发已删除',
+  ua_saved: 'UA 规则保存成功',
+  ua_deleted: 'UA 规则已删除',
+  ua_moved: 'UA 规则顺序已保存'
 };
 const query = new URLSearchParams(location.search);
 const initialNotice = notices[query.get('notice')];
@@ -344,14 +348,53 @@ def forward_list(version, rules):
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无特殊转发</td></tr>'}</tbody></table></div>'''
 
 
+UA_VARIANTS = {"standard": "标准版", "enhanced": "增强版"}
+
+
+def ua_rule_form(version, rule=None, draft=None):
+    values = draft or rule or {}
+    identity = escape(rule["id"] if rule else "", quote=True)
+    pattern = escape(values.get("pattern", ""), quote=True)
+    variant = values.get("variant", "standard")
+    active = values.get("active", True) not in (False, "0")
+    options = "".join(f'<option value="{key}" {"selected" if variant == key else ""}>{label}</option>'
+                      for key, label in UA_VARIANTS.items())
+    return f'''<form class="form" method="post" action="/panel/ua-rules/save">{fields(version)}
+<input type="hidden" name="id" value="{identity}">
+<label>User-Agent 正则<input name="pattern" value="{pattern}" placeholder="^Shadowrocket/" maxlength="{MAX_UA_PATTERN}" spellcheck="false" required></label>
+<p class="form-help">对完整 User-Agent 搜索匹配。用 <code>^</code> 限定开头，<code>(?i)</code> 忽略大小写。</p>
+<label>返回模板<select name="variant">{options}</select></label>
+<label>状态<select name="active"><option value="1" {"selected" if active else ""}>启用</option><option value="0" {"" if active else "selected"}>停用</option></select></label>
+<div><button type="submit">保存 UA 规则</button> <a class="button-link" href="/panel/ua-rules">返回规则列表</a></div></form>'''
+
+
+def ua_rule_list(version, rules):
+    rows = []
+    for index, rule in enumerate(rules):
+        identity = escape(rule["id"], quote=True)
+        state = "live" if rule["active"] else "revoked"
+        buttons = (f'<button type="submit" name="direction" value="up" {"disabled" if index == 0 else ""}>上移</button>'
+                   f'<button type="submit" name="direction" value="down" {"disabled" if index == len(rules) - 1 else ""}>下移</button>')
+        rows.append(f'''<tr data-state="{state}"><td>{index + 1}</td><td class="ua-pattern"><code>{escape(rule['pattern'])}</code></td>
+<td>{UA_VARIANTS[rule['variant']]}</td><td><span class="badge">{STATE_LABELS[state]}</span></td>
+<td><div class="actions"><a class="button-link" href="/panel/ua-rules/edit?id={identity}">编辑</a>
+<form class="actions" method="post" action="/panel/ua-rules/move">{fields(version)}<input type="hidden" name="id" value="{identity}">{buttons}</form>
+<form method="post" action="/panel/ua-rules/delete">{fields(version)}<input type="hidden" name="id" value="{identity}">
+<button type="submit" class="revoke" data-confirm="删除这条 UA 规则？">删除</button></form></div></td></tr>''')
+    return f'''<p>按顺序采用第一条命中的启用规则。未命中时按内置客户端版本判断，增强版模板为空时统一下发标准版。</p>
+<p><a class="button-link" href="/panel/ua-rules/new">新增 UA 规则</a></p>
+<div class="grid"><table><thead><tr><th>顺序</th><th>User-Agent 正则</th><th>返回模板</th><th>状态</th><th>操作</th></tr></thead>
+<tbody>{''.join(rows) or '<tr><td colspan="5">暂无自定义规则</td></tr>'}</tbody></table></div>'''
+
+
 def template_form(version, template, enhanced, *, open_enhanced=False):
     open_attr = " open" if open_enhanced else ""
     status = "已启用" if enhanced.strip() else "使用标准版"
-    return f"""<p>用 <code>{{{{UUID}}}}</code> 代入当前订阅的 UUID。标准版供旧客户端、浏览器和未知 UA 使用。</p>
+    return f"""<p>用 <code>{{{{UUID}}}}</code> 代入当前订阅的 UUID。可以用 <a href="/panel/ua-rules">UA 规则</a> 自定义模板分流。</p>
 <details class="enhanced-config"{open_attr}>
 <summary>增强版模板（{status}）</summary>
 <form class="form" method="post" action="/panel/template/enhanced">{fields(version)}
-<p class="form-help">粘贴包含 Snell v6 的完整 YAML。最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5。清空并保存后统一使用标准版。</p>
+<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5。清空并保存后统一使用标准版。</p>
 <label>增强版模板 YAML<textarea name="enhanced" spellcheck="false">
 {escape(enhanced)}</textarea></label>
 <div><button type="submit">保存增强版模板</button></div></form>
@@ -395,7 +438,7 @@ class Handler(BaseHTTPRequestHandler):
 <meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title><style>{STYLE}</style>
 </head><body><main><h1>{title}</h1><nav aria-label="面板导航">
 <a href="/panel/">订阅列表</a><a href="/panel/new">新增订阅</a>
-<a href="/panel/template">编辑模板</a><a href="/panel/export">导出 TSV</a>
+<a href="/panel/template">编辑模板</a><a href="/panel/ua-rules">UA 规则</a><a href="/panel/export">导出 TSV</a>
 <a href="/panel/forwards">特殊转发</a>
 </nav>{message}{content}</main>{AGENT_DIALOG}<div id="toast" role="status" aria-live="polite" hidden></div><script nonce="{nonce}">{SCRIPT}</script></body></html>"""
         self.respond(status, body.encode("utf-8"), nonce=nonce)
@@ -442,12 +485,21 @@ class Handler(BaseHTTPRequestHandler):
             # Serve both variants without a shared Last-Modified validator.
             # Older snapshots can still contain generated per-subscription files.
             if (directory / "enhanced.yaml").is_file() or (directory / "personalized").is_dir():
-                enhanced = read_enhanced(version) if supports_enhanced(agent) else ""
+                enhanced = read_enhanced(version)
+                if enhanced:
+                    try:
+                        ua_rule = match_ua_rule(read_ua_rules(version), agent)
+                    except TimeoutError:
+                        enhanced = ""
+                    else:
+                        eligible = ua_rule["variant"] == "enhanced" if ua_rule else supports_enhanced(agent)
+                        if not eligible:
+                            enhanced = ""
                 body = (enhanced or template).replace(MARKER, user["uuid"]).encode("utf-8")
                 return self.respond(200, body, "text/plain; charset=utf-8", disposition="inline",
                                     headers={"Vary": "User-Agent"})
             return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
-        if path.path not in {"/panel/", "/panel/new", "/panel/edit", "/panel/template", "/panel/export", "/panel/user-agents", "/panel/forwards", "/panel/forwards/new", "/panel/forwards/edit"}:
+        if path.path not in {"/panel/", "/panel/new", "/panel/edit", "/panel/template", "/panel/export", "/panel/user-agents", "/panel/forwards", "/panel/forwards/new", "/panel/forwards/edit", "/panel/ua-rules", "/panel/ua-rules/new", "/panel/ua-rules/edit"}:
             return self.respond(404)
         version, users, template = read()
         if path.path == "/panel/":
@@ -467,6 +519,17 @@ class Handler(BaseHTTPRequestHandler):
             if not rule:
                 return self.respond(404)
             return self.page("编辑特殊转发", forward_form(version, rule))
+        if path.path.startswith("/panel/ua-rules"):
+            ua_rules = read_ua_rules(version)
+            if path.path == "/panel/ua-rules":
+                return self.page("UA 规则", ua_rule_list(version, ua_rules))
+            if path.path == "/panel/ua-rules/new":
+                return self.page("新增 UA 规则", ua_rule_form(version))
+            identity = parse_qs(path.query).get("id", [""])[0]
+            ua_rule = next((r for r in ua_rules if r["id"] == identity), None)
+            if not ua_rule:
+                return self.respond(404)
+            return self.page("编辑 UA 规则", ua_rule_form(version, ua_rule))
         if path.path == "/panel/user-agents":
             parameters = parse_qs(path.query)
             folder = parameters.get("folder", [""])[0]
@@ -497,7 +560,7 @@ class Handler(BaseHTTPRequestHandler):
                      disposition='attachment; filename="clash-subscriptions.tsv"')
 
     def do_POST(self):
-        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/template", "/panel/template/enhanced", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete"}:
+        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/template", "/panel/template/enhanced", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete", "/panel/ua-rules/save", "/panel/ua-rules/move", "/panel/ua-rules/delete"}:
             return self.respond(404)
         if self.headers.get("Origin") != ORIGIN:
             return self.respond(403)
@@ -518,6 +581,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.page("请重新打开表单", "<p>订阅数据已更新，请从面板重新进入。</p>", 409)
         folder = form.get("folder", "")
         identity = form.get("id", "")
+        if self.path.startswith("/panel/ua-rules/"):
+            return self.save_ua_rules(version, users, template, identity, form)
         user = find_user(users, identity, folder)
         rules = read_forwards(version)
         rule = next((r for r in rules if r["id"] == identity), None)
@@ -623,6 +688,46 @@ class Handler(BaseHTTPRequestHandler):
             destination.update(q=form.get("q", ""), page=form.get("page", "1"), sort=form.get("sort", ""), direction=form.get("direction", "asc"))
         base = "/panel/forwards" if self.path.startswith("/panel/forwards/") else "/panel/"
         self.respond(303, location=base + "?" + urlencode(destination))
+
+    def save_ua_rules(self, version, users, template, identity, form):
+        rules = read_ua_rules(version)
+        rule = next((r for r in rules if r["id"] == identity), None)
+        if (identity or self.path != "/panel/ua-rules/save") and not rule:
+            return self.respond(404)
+        try:
+            if self.path == "/panel/ua-rules/delete":
+                rules.remove(rule)
+                notice = "ua_deleted"
+            elif self.path == "/panel/ua-rules/move":
+                step = {"up": -1, "down": 1}.get(form.get("direction"))
+                if step is None:
+                    return self.respond(400)
+                index = rules.index(rule)
+                destination = index + step
+                if not 0 <= destination < len(rules):
+                    return self.respond(400)
+                rules[index], rules[destination] = rules[destination], rules[index]
+                notice = "ua_moved"
+            else:
+                pattern = form.get("pattern", "")
+                validate_ua_pattern(pattern)
+                variant, active = form.get("variant"), form.get("active")
+                if variant not in UA_VARIANTS or active not in {"0", "1"}:
+                    raise InputError("请选择模板与规则状态")
+                if rule is None:
+                    if len(rules) >= MAX_UA_RULES:
+                        raise InputError(f"最多可添加 {MAX_UA_RULES} 条 UA 规则")
+                    rule = dict(id=secrets.token_hex(16))
+                    rules.append(rule)
+                rule.update(pattern=pattern, variant=variant, active=active == "1")
+                notice = "ua_saved"
+            publish(users, template, ua_rules=rules)
+        except InputError as exc:
+            return self.page("编辑 UA 规则" if rule else "新增 UA 规则",
+                             ua_rule_form(version, rule, form), 400, str(exc))
+        except OSError:
+            return self.page("保存失败", "<p>请稍后重试。</p>", 500)
+        return self.respond(303, location="/panel/ua-rules?" + urlencode({"notice": notice}))
 
     do_HEAD = do_GET
 

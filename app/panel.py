@@ -15,7 +15,7 @@ import usage
 
 from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, user_id, find_user, folder_for, publish, read, subscription, validate_template
 from store import MARKER, canonical_expiry, canonical_forward, display_expiry, expiry_time, item_state, read_forwards, read_enhanced, supports_enhanced, find_subscription
-from store import MAX_UA_PATTERN, MAX_UA_RULES, match_ua_rule, read_ua_rules, validate_ua_pattern
+from store import MAX_UA_PATTERN, MAX_UA_RULES, canonical_ua_minimum, read_ua_rules, validate_ua_pattern
 
 SOCKET = Path(os.environ.get("PANEL_SOCKET", "/run/panel/panel.sock"))
 CSRF = secrets.token_urlsafe(32)
@@ -348,22 +348,18 @@ def forward_list(version, rules):
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无特殊转发</td></tr>'}</tbody></table></div>'''
 
 
-UA_VARIANTS = {"standard": "标准版", "enhanced": "增强版"}
-
-
 def ua_rule_form(version, rule=None, draft=None):
     values = draft or rule or {}
     identity = escape(rule["id"] if rule else "", quote=True)
     pattern = escape(values.get("pattern", ""), quote=True)
-    variant = values.get("variant", "standard")
+    minimum = escape(values.get("minimum_version", ""), quote=True)
     active = values.get("active", True) not in (False, "0")
-    options = "".join(f'<option value="{key}" {"selected" if variant == key else ""}>{label}</option>'
-                      for key, label in UA_VARIANTS.items())
     return f'''<form class="form" method="post" action="/panel/ua-rules/save">{fields(version)}
 <input type="hidden" name="id" value="{identity}">
 <label>User-Agent 正则<input name="pattern" value="{pattern}" placeholder="^Shadowrocket/" maxlength="{MAX_UA_PATTERN}" spellcheck="false" required></label>
-<p class="form-help">对完整 User-Agent 搜索匹配。用 <code>^</code> 限定开头，<code>(?i)</code> 忽略大小写。</p>
-<label>返回模板<select name="variant">{options}</select></label>
+<p class="form-help">例如 <code>^Shadowrocket/</code> 会读取紧随其后的版本号。也可用一个捕获组或命名组 <code>(?P&lt;version&gt;…)</code> 提取版本。</p>
+<label>最低版本<input name="minimum_version" value="{minimum}" placeholder="例如 1982 或 2.5.11" maxlength="40" spellcheck="false" required></label>
+<p class="form-help">达到最低版本使用增强版。低于门槛或无法读取版本时使用标准版。</p>
 <label>状态<select name="active"><option value="1" {"selected" if active else ""}>启用</option><option value="0" {"" if active else "selected"}>停用</option></select></label>
 <div><button type="submit">保存 UA 规则</button> <a class="button-link" href="/panel/ua-rules">返回规则列表</a></div></form>'''
 
@@ -372,18 +368,20 @@ def ua_rule_list(version, rules):
     rows = []
     for index, rule in enumerate(rules):
         identity = escape(rule["id"], quote=True)
-        state = "live" if rule["active"] else "revoked"
+        minimum = rule.get("minimum_version")
+        state = "live" if rule["active"] and minimum else "revoked"
+        status = STATE_LABELS[state] if minimum else "待设置最低版本"
         buttons = (f'<button type="submit" name="direction" value="up" {"disabled" if index == 0 else ""}>上移</button>'
                    f'<button type="submit" name="direction" value="down" {"disabled" if index == len(rules) - 1 else ""}>下移</button>')
         rows.append(f'''<tr data-state="{state}"><td>{index + 1}</td><td class="ua-pattern"><code>{escape(rule['pattern'])}</code></td>
-<td>{UA_VARIANTS[rule['variant']]}</td><td><span class="badge">{STATE_LABELS[state]}</span></td>
+<td>{escape(minimum or '—')}</td><td><span class="badge">{status}</span></td>
 <td><div class="actions"><a class="button-link" href="/panel/ua-rules/edit?id={identity}">编辑</a>
 <form class="actions" method="post" action="/panel/ua-rules/move">{fields(version)}<input type="hidden" name="id" value="{identity}">{buttons}</form>
 <form method="post" action="/panel/ua-rules/delete">{fields(version)}<input type="hidden" name="id" value="{identity}">
 <button type="submit" class="revoke" data-confirm="删除这条 UA 规则？">删除</button></form></div></td></tr>''')
     return f'''<p>按顺序采用第一条命中的启用规则。未命中时按内置客户端版本判断，增强版模板为空时统一下发标准版。</p>
 <p><a class="button-link" href="/panel/ua-rules/new">新增 UA 规则</a></p>
-<div class="grid"><table><thead><tr><th>顺序</th><th>User-Agent 正则</th><th>返回模板</th><th>状态</th><th>操作</th></tr></thead>
+<div class="grid"><table><thead><tr><th>顺序</th><th>User-Agent 正则</th><th>最低版本</th><th>状态</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无自定义规则</td></tr>'}</tbody></table></div>'''
 
 
@@ -486,15 +484,8 @@ class Handler(BaseHTTPRequestHandler):
             # Older snapshots can still contain generated per-subscription files.
             if (directory / "enhanced.yaml").is_file() or (directory / "personalized").is_dir():
                 enhanced = read_enhanced(version)
-                if enhanced:
-                    try:
-                        ua_rule = match_ua_rule(read_ua_rules(version), agent)
-                    except TimeoutError:
-                        enhanced = ""
-                    else:
-                        eligible = ua_rule["variant"] == "enhanced" if ua_rule else supports_enhanced(agent)
-                        if not eligible:
-                            enhanced = ""
+                if enhanced and not supports_enhanced(agent, read_ua_rules(version)):
+                    enhanced = ""
                 body = (enhanced or template).replace(MARKER, user["uuid"]).encode("utf-8")
                 return self.respond(200, body, "text/plain; charset=utf-8", disposition="inline",
                                     headers={"Vary": "User-Agent"})
@@ -711,15 +702,17 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 pattern = form.get("pattern", "")
                 validate_ua_pattern(pattern)
-                variant, active = form.get("variant"), form.get("active")
-                if variant not in UA_VARIANTS or active not in {"0", "1"}:
-                    raise InputError("请选择模板与规则状态")
+                minimum = canonical_ua_minimum(form.get("minimum_version", ""))
+                active = form.get("active")
+                if active not in {"0", "1"}:
+                    raise InputError("请选择规则状态")
                 if rule is None:
                     if len(rules) >= MAX_UA_RULES:
                         raise InputError(f"最多可添加 {MAX_UA_RULES} 条 UA 规则")
                     rule = dict(id=secrets.token_hex(16))
                     rules.append(rule)
-                rule.update(pattern=pattern, variant=variant, active=active == "1")
+                rule.pop("variant", None)
+                rule.update(pattern=pattern, minimum_version=minimum, active=active == "1")
                 notice = "ua_saved"
             publish(users, template, ua_rules=rules)
         except InputError as exc:

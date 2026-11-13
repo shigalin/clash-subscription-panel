@@ -22,6 +22,9 @@ MAX_TEMPLATE_BYTES = 512 * 1024
 MAX_UA_RULES = 50
 MAX_UA_PATTERN = 256
 TIMEZONE = ZoneInfo("Asia/Taipei")
+VERSION_NUMBER = r"[0-9]{1,9}(?:\.[0-9]{1,9}){0,3}"
+UA_VERSION = re.compile(rf"v?(?P<version>{VERSION_NUMBER})", re.IGNORECASE)
+UA_VERSION_AFTER_MATCH = re.compile(UA_VERSION.pattern + r"(?:\.Meta)?(?=\s|$)", re.IGNORECASE)
 ENHANCED_UA = re.compile(
     r"^(?P<product>[a-z][a-z0-9.-]*)/v?"
     r"(?P<version>[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5})"
@@ -36,7 +39,24 @@ ENHANCED_MINIMUM = {
 }
 
 
-def supports_enhanced(agent):
+def supports_enhanced(agent, rules=()):
+    try:
+        selected = match_ua_rule(rules, agent)
+    except TimeoutError:
+        return False
+    if selected:
+        rule, match = selected
+        if "version" in match.re.groupindex:
+            version = match["version"]
+        elif match.re.groups == 1:
+            version = match[1]
+        else:
+            following = UA_VERSION_AFTER_MATCH.match(agent, match.end())
+            version = following["version"] if following else None
+        actual = numeric_version(version or "")
+        minimum = numeric_version(rule["minimum_version"])
+        return actual is not None and minimum is not None and actual >= minimum
+
     match = ENHANCED_UA.match(agent.strip())
     if not match:
         return False
@@ -50,6 +70,21 @@ def supports_enhanced(agent):
 
 class InputError(ValueError):
     pass
+
+
+def numeric_version(value):
+    match = UA_VERSION.fullmatch(value)
+    if not match:
+        return None
+    parts = tuple(map(int, match["version"].split(".")))
+    return parts + (0,) * (4 - len(parts))
+
+
+def canonical_ua_minimum(value):
+    value = value.strip()
+    if numeric_version(value) is None:
+        raise InputError("最低版本请输入 1～4 段数字，例如 1982 或 2.5.11")
+    return value
 
 
 def validate_ua_pattern(pattern):
@@ -73,8 +108,12 @@ def match_ua_rule(rules, agent):
     previous = signal.signal(signal.SIGALRM, _ua_timeout)
     try:
         signal.setitimer(signal.ITIMER_REAL, 0.025)
-        return next((rule for rule in rules if rule["active"]
-                     and re.search(rule["pattern"], agent)), None)
+        for rule in rules:
+            if rule["active"] and rule.get("minimum_version"):
+                match = re.search(rule["pattern"], agent)
+                if match:
+                    return rule, match
+        return None
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)

@@ -15,7 +15,7 @@ TIMEZONE = ZoneInfo("Asia/Taipei")
 _connection = None
 CLIENT_AGENT = re.compile(
     r"^(?:clash|clash\.meta|clashmeta|clashforandroid|clashmetaforandroid|"
-    r"clashforwindows|clash-verge(?:-rev)?|mihomo|shadowrocket)(?=$|[/\s(])",
+    r"clashforwindows|clash-verge(?:-rev)?|mihomo(?:\.party)?|shadowrocket)(?=$|[/\s(])",
     re.IGNORECASE,
 )
 BROWSER_AGENT = re.compile(

@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, quote, urlencode, urlsplit
 import usage
 
 from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, user_id, find_user, folder_for, publish, read, subscription, validate_template
-from store import canonical_expiry, canonical_forward, display_expiry, expiry_time, item_state, read_forwards, read_personalized, personalized_path, find_subscription
+from store import MARKER, canonical_expiry, canonical_forward, display_expiry, expiry_time, item_state, read_forwards, read_enhanced, supports_enhanced, find_subscription
 
 SOCKET = Path(os.environ.get("PANEL_SOCKET", "/run/panel/panel.sock"))
 CSRF = secrets.token_urlsafe(32)
@@ -32,8 +32,8 @@ function showToast(message, error = false) {
 }
 const notices = {
   saved: '订阅保存成功',
-  personalized_saved: '个性化配置保存成功',
-  template: '通用模板保存成功，使用通用模板的订阅已更新',
+  template: '标准模板保存成功',
+  enhanced: '增强版模板保存成功',
   revoked: '订阅已停用',
   restored: '订阅已恢复',
   deleted: '订阅已删除，链接已失效',
@@ -227,7 +227,6 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
     )
     for user in visible:
         email, folder = escape(user["email"]), escape(user["folder"])
-        profile_badge = '<span class="profile-kind">个性化</span>' if personalized_path(BASE / version, user).is_file() else ""
         url = escape(subscription(user), quote=True)
         edit = "/panel/edit?" + urlencode({"id": user_id(user)})
         state = states[user_id(user)]
@@ -245,7 +244,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
             if count else ""
         )
         rows.append(f"""<tr data-state="{state}">
-<td>{email}</td><td><code>{folder}</code>{profile_badge}</td><td><span class="badge">{label}</span></td>
+<td>{email}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
 <td>{display_expiry(user)}</td>
 <td class="last-request">{last_request}</td>
 <td class="update-count"><div class="update-summary"><strong>{updates}</strong>{old_updates}{agent_html}</div>
@@ -259,7 +258,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 </form>
 <form method="post" action="/panel/subscriber/delete">{fields(version)}{context}
 <input type="hidden" name="id" value="{escape(user_id(user), quote=True)}">
-<button type="submit" class="revoke" data-confirm="删除订阅 {email}？链接会立即失效，并清除该订阅的个性化配置、UA 记录和更新次数。此操作无法在面板中撤销。">删除</button>
+<button type="submit" class="revoke" data-confirm="删除订阅 {email}？链接会立即失效，并清除该订阅的 UA 记录和更新次数。此操作无法在面板中撤销。">删除</button>
 </form></div></td></tr>""")
     def page_link(label, target, enabled):
         if not enabled:
@@ -293,7 +292,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 
 
-def subscriber_form(version, user=None, draft=None, *, personalized="", custom_draft=None):
+def subscriber_form(version, user=None, draft=None):
     values = draft or user or {}
     original = escape(user["folder"] if user else "", quote=True)
     identity = escape(user_id(user) if user else "", quote=True)
@@ -301,7 +300,7 @@ def subscriber_form(version, user=None, draft=None, *, personalized="", custom_d
     credential = escape(values.get("uuid", ""), quote=True)
     token = escape(values.get("token", ""), quote=True)
     hint = "<p>修改邮箱前缀会改变订阅路径。修改 UUID 会更新当前链接的配置。</p>" if user else ""
-    form = f"""{hint}<form class="form" method="post" action="/panel/subscriber">
+    return f"""{hint}<form class="form" method="post" action="/panel/subscriber">
 {fields(version)}<input type="hidden" name="folder" value="{original}"><input type="hidden" name="id" value="{identity}">
 <label>邮箱 / 名称 <input name="email" value="{email}" maxlength="254" required></label>
 <label>UUID <input name="uuid" value="{credential}" maxlength="36" required></label>
@@ -313,21 +312,6 @@ autocomplete="off" spellcheck="false" placeholder="留空自动生成新令牌">
 <label>到期时间（北京时间）<input type="datetime-local" name="expires_at" value="{escape(values.get('expires_at', '') or '', quote=True) if draft else display_expiry(values, form=True)}"></label>
 <p class="form-help">留空表示长期有效。到期后链接停止返回配置，延长时间后可继续使用。</p>
 <div><button type="submit">保存订阅</button></div></form>"""
-    if not user:
-        return form
-    custom = personalized if custom_draft is None else custom_draft
-    config_status = "已设置" if personalized else "使用通用模板"
-    open_config = " open" if custom_draft is not None else ""
-    return form + f"""
-<details class="personalized-config"{open_config}>
-<summary>个性化配置（{config_status}）</summary>
-<form class="form" method="post" action="/panel/subscriber/personalized">
-{fields(version)}<input type="hidden" name="id" value="{identity}">
-<p class="form-help">粘贴完整 YAML。支持用 <code>{{{{UUID}}}}</code> 代入此订阅的 UUID。清空并保存后使用通用模板。</p>
-<label>个性化 YAML<textarea name="personalized" spellcheck="false">
-{escape(custom)}</textarea></label>
-<div><button type="submit">保存个性化配置</button></div></form>
-</details>"""
 
 
 def forward_form(version, rule=None, draft=None):
@@ -360,12 +344,22 @@ def forward_list(version, rules):
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无特殊转发</td></tr>'}</tbody></table></div>'''
 
 
-def template_form(version, template):
-    return f"""<p>用 <code>{{{{UUID}}}}</code> 标记用户 UUID。保存后会更新使用通用模板的订阅。</p>
+def template_form(version, template, enhanced, *, open_enhanced=False):
+    open_attr = " open" if open_enhanced else ""
+    status = "已启用" if enhanced.strip() else "使用标准版"
+    return f"""<p>用 <code>{{{{UUID}}}}</code> 代入当前订阅的 UUID。标准版供旧客户端、浏览器和未知 UA 使用。</p>
+<details class="enhanced-config"{open_attr}>
+<summary>增强版模板（{status}）</summary>
+<form class="form" method="post" action="/panel/template/enhanced">{fields(version)}
+<p class="form-help">粘贴包含 Snell v6 的完整 YAML。最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5。清空并保存后统一使用标准版。</p>
+<label>增强版模板 YAML<textarea name="enhanced" spellcheck="false">
+{escape(enhanced)}</textarea></label>
+<div><button type="submit">保存增强版模板</button></div></form>
+</details>
 <form class="form" method="post" action="/panel/template">{fields(version)}
-<label>YAML 模板<textarea name="template" spellcheck="false" required>
+<label>标准模板 YAML<textarea name="template" spellcheck="false" required>
 {escape(template)}</textarea></label>
-<div><button type="submit" data-confirm="保存模板并更新使用通用模板的订阅？">保存模板</button></div></form>"""
+<div><button type="submit" data-confirm="保存标准模板并更新订阅？">保存标准模板</button></div></form>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -417,7 +411,7 @@ class Handler(BaseHTTPRequestHandler):
             usage.record(self.headers)
             return self.respond(204)
         if path.path in {"/internal/resolve", "/internal/forward"}:
-            version, users, _ = read()
+            version, users, template = read()
             rules = read_forwards(version)
             if path.path == "/internal/forward":
                 rule = next((r for r in rules if r["id"] == self.headers.get("X-Forward-Id")), None)
@@ -435,14 +429,23 @@ class Handler(BaseHTTPRequestHandler):
             if not user:
                 return self.respond(404)
             state = item_state(user)
+            agent = self.headers.get("X-Request-Agent", "")
             usage.record({
                 "X-Usage-Token": user["token"], "X-Usage-Folder": user["folder"],
                 "X-Usage-Method": self.headers.get("X-Request-Method", ""),
                 "X-Usage-Time": self.headers.get("X-Request-Time", ""),
-                "X-Usage-Agent": self.headers.get("X-Request-Agent", ""),
+                "X-Usage-Agent": agent,
             }, count_update=state == "live")
             if state != "live":
                 return self.respond(404)
+            directory = BASE / version
+            # Serve both variants without a shared Last-Modified validator.
+            # Older snapshots can still contain generated per-subscription files.
+            if (directory / "enhanced.yaml").is_file() or (directory / "personalized").is_dir():
+                enhanced = read_enhanced(version) if supports_enhanced(agent) else ""
+                body = (enhanced or template).replace(MARKER, user["uuid"]).encode("utf-8")
+                return self.respond(200, body, "text/plain; charset=utf-8", disposition="inline",
+                                    headers={"Vary": "User-Agent"})
             return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
         if path.path not in {"/panel/", "/panel/new", "/panel/edit", "/panel/template", "/panel/export", "/panel/user-agents", "/panel/forwards", "/panel/forwards/new", "/panel/forwards/edit"}:
             return self.respond(404)
@@ -480,9 +483,11 @@ class Handler(BaseHTTPRequestHandler):
             user = find_user(users, parameters.get("id", [""])[0], parameters.get("folder", [""])[0])
             if not user:
                 return self.respond(404)
-            return self.page("编辑订阅", subscriber_form(version, user, personalized=read_personalized(version, user)))
+            return self.page("编辑订阅", subscriber_form(version, user))
         if path.path == "/panel/template":
-            return self.page("编辑 YAML 模板", template_form(version, template))
+            notice = parse_qs(path.query).get("notice", [""])[0]
+            return self.page("编辑 YAML 模板", template_form(
+                version, template, read_enhanced(version), open_enhanced=notice == "enhanced"))
         output = io.StringIO(newline="")
         writer = csv.writer(output, delimiter="\t", lineterminator="\n")
         writer.writerow(["email", "uuid", "folder", "url", "status", "expires_at"])
@@ -492,7 +497,7 @@ class Handler(BaseHTTPRequestHandler):
                      disposition='attachment; filename="clash-subscriptions.tsv"')
 
     def do_POST(self):
-        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/personalized", "/panel/subscriber/delete", "/panel/template", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete"}:
+        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/template", "/panel/template/enhanced", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete"}:
             return self.respond(404)
         if self.headers.get("Origin") != ORIGIN:
             return self.respond(403)
@@ -524,7 +529,7 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 return self.respond(500)
             return self.respond(204)
-        overrides = None
+        enhanced = None
         try:
             if self.path.startswith("/panel/forwards/"):
                 if self.path == "/panel/forwards/delete":
@@ -546,18 +551,6 @@ class Handler(BaseHTTPRequestHandler):
                         rules.append(rule)
                     rule.update(path=source, target=target, active=form["active"] == "1", expires_at=expires_at)
                     notice = "forward_saved"
-            elif self.path == "/panel/subscriber/personalized":
-                if not identity or not user:
-                    return self.respond(404)
-                if "personalized" not in form:
-                    return self.respond(400)
-                custom = form["personalized"].replace("\r\n", "\n")
-                if custom.strip():
-                    validate_template(custom, require_marker=False)
-                else:
-                    custom = ""
-                overrides = {user_id(user): custom}
-                notice = "personalized_saved"
             elif self.path == "/panel/subscriber/delete":
                 if not identity or not user:
                     return self.respond(404)
@@ -588,24 +581,32 @@ class Handler(BaseHTTPRequestHandler):
                     user.setdefault("usage_key", user["token"])
                 user.update(email=email, folder=new_folder, uuid=credential, token=new_token, expires_at=expires_at)
                 notice = "saved"
+            elif self.path == "/panel/template/enhanced":
+                if "enhanced" not in form:
+                    return self.respond(400)
+                enhanced = form["enhanced"].replace("\r\n", "\n")
+                if enhanced.strip():
+                    validate_template(enhanced, require_marker=False)
+                else:
+                    enhanced = ""
+                notice = "enhanced"
             else:
                 template = form.get("template", "")
                 validate_template(template)
                 # Browsers normalize textarea line breaks on form submission.
                 template = template.replace("\r\n", "\n")
                 notice = "template"
-            publish(users, template, rules, overrides=overrides)
+            publish(users, template, rules, enhanced=enhanced)
         except InputError as exc:
             if self.path.startswith("/panel/forwards/"):
                 return self.page("编辑特殊转发" if rule else "新增特殊转发", forward_form(version, rule, form), 400, str(exc))
             if self.path == "/panel/template":
-                return self.page("编辑 YAML 模板", template_form(version, template), 400, str(exc))
-            personalized = read_personalized(version, user) if user else ""
-            if self.path == "/panel/subscriber/personalized":
-                return self.page("编辑订阅", subscriber_form(version, user, personalized=personalized,
-                                 custom_draft=form["personalized"]), 400, str(exc))
+                return self.page("编辑 YAML 模板", template_form(version, template, read_enhanced(version)), 400, str(exc))
+            if self.path == "/panel/template/enhanced":
+                return self.page("编辑 YAML 模板", template_form(
+                    version, template, form["enhanced"], open_enhanced=True), 400, str(exc))
             return self.page("编辑订阅" if user else "新增订阅",
-                             subscriber_form(version, user, form, personalized=personalized), 400, str(exc))
+                             subscriber_form(version, user, form), 400, str(exc))
         except OSError:
             return self.page("保存失败", "<p>请稍后重试。</p>", 500)
         if self.path == "/panel/subscriber/delete":
@@ -616,9 +617,8 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 notice = "deleted_history_retained"
         destination = {"notice": notice}
-        if self.path == "/panel/subscriber/personalized":
-            destination["id"] = user_id(user)
-            return self.respond(303, location="/panel/edit?" + urlencode(destination))
+        if self.path in {"/panel/template", "/panel/template/enhanced"}:
+            return self.respond(303, location="/panel/template?" + urlencode(destination))
         if self.path in {"/panel/state", "/panel/subscriber/delete"}:
             destination.update(q=form.get("q", ""), page=form.get("page", "1"), sort=form.get("sort", ""), direction=form.get("direction", "asc"))
         base = "/panel/forwards" if self.path.startswith("/panel/forwards/") else "/panel/"

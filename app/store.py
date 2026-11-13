@@ -1,6 +1,5 @@
 import json
 from datetime import datetime
-import hashlib
 import ipaddress
 import os
 from pathlib import Path
@@ -20,6 +19,30 @@ GENERATION = re.compile(r"gen-[a-f0-9]{32}")
 MARKER = "{{UUID}}"
 MAX_TEMPLATE_BYTES = 512 * 1024
 TIMEZONE = ZoneInfo("Asia/Taipei")
+ENHANCED_UA = re.compile(
+    r"^(?P<product>[a-z][a-z0-9.-]*)/v?"
+    r"(?P<version>[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5})"
+    r"(?P<suffix>\.Meta)?(?=\s|$)",
+    re.IGNORECASE,
+)
+ENHANCED_MINIMUM = {
+    "clashmetaforandroid": (2, 11, 37),
+    "clash.meta": (1, 19, 34),
+    "clash-verge": (2, 5, 11),
+    "mihomo.party": (2, 0, 5),
+}
+
+
+def supports_enhanced(agent):
+    match = ENHANCED_UA.match(agent.strip())
+    if not match:
+        return False
+    product = match["product"].lower()
+    minimum = ENHANCED_MINIMUM.get(product)
+    if minimum is None or (match["suffix"] and product != "clashmetaforandroid"):
+        return False
+    version = tuple(map(int, match["version"].split(".")))
+    return version >= minimum
 
 
 class InputError(ValueError):
@@ -174,23 +197,18 @@ def read_forwards(version=None):
     return json.loads(source.read_bytes()) if source.exists() else []
 
 
-def personalized_path(directory, user):
-    key = hashlib.sha256(user_id(user).encode("utf-8")).hexdigest()
-    return directory / "personalized" / (key + ".yaml")
-
-
-def read_personalized(version, user):
+def read_enhanced(version):
     if version is None:
         return ""
     if not GENERATION.fullmatch(version):
         raise RuntimeError("Invalid subscription generation")
     try:
-        return personalized_path(BASE / version, user).read_bytes().decode("utf-8")
+        return (BASE / version / "enhanced.yaml").read_bytes().decode("utf-8")
     except FileNotFoundError:
         return ""
 
 
-def publish(users, template, forwards=None, *, overrides=None):
+def publish(users, template, forwards=None, *, enhanced=None):
     """Build a complete private snapshot, then switch the HTTPS document root."""
     group = WEB_GID
     version = "gen-" + secrets.token_hex(16)
@@ -200,7 +218,8 @@ def publish(users, template, forwards=None, *, overrides=None):
     previous = os.readlink(current) if current.is_symlink() else None
     if forwards is None:
         forwards = read_forwards(previous) if previous else []
-    overrides = overrides or {}
+    if enhanced is None:
+        enhanced = read_enhanced(previous)
 
     def directory(path):
         path.mkdir(exist_ok=True)
@@ -212,22 +231,19 @@ def publish(users, template, forwards=None, *, overrides=None):
         (stage / "users.json").write_text(json.dumps(users, ensure_ascii=False), encoding="utf-8")
         (stage / "forwards.json").write_text(json.dumps(forwards, ensure_ascii=False), encoding="utf-8")
         (stage / "template.yaml").write_bytes(template.encode("utf-8"))
+        if enhanced:
+            source = stage / "enhanced.yaml"
+            source.write_bytes(enhanced.encode("utf-8"))
+            source.chmod(0o600)
         directory(stage / "live")
         (stage / "revoked").mkdir()
         for user in users:
-            identity = user_id(user)
-            custom = overrides[identity] if identity in overrides else read_personalized(previous, user)
-            if custom:
-                source = personalized_path(stage, user)
-                source.parent.mkdir(mode=0o700, exist_ok=True)
-                source.write_bytes(custom.encode("utf-8"))
-                source.chmod(0o600)
             status = "live" if user["active"] else "revoked"
             account = stage / status / user["folder"]
             directory(account)
             directory(account / user["token"])
             profile = account / user["token"] / "clash.yaml"
-            profile.write_bytes((custom or template).replace(MARKER, user["uuid"]).encode("utf-8"))
+            profile.write_bytes(template.replace(MARKER, user["uuid"]).encode("utf-8"))
             os.chown(profile, -1, group)
             profile.chmod(0o640)
         pending.symlink_to(version, target_is_directory=True)

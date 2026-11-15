@@ -23,12 +23,16 @@ MAX_UA_RULES = 50
 MAX_UA_PATTERN = 256
 TIMEZONE = ZoneInfo("Asia/Taipei")
 VERSION_NUMBER = r"[0-9]{1,9}(?:\.[0-9]{1,9}){0,3}"
-UA_VERSION = re.compile(rf"v?(?P<version>{VERSION_NUMBER})", re.IGNORECASE)
-UA_VERSION_AFTER_MATCH = re.compile(UA_VERSION.pattern + r"(?:\.Meta)?(?=\s|$)", re.IGNORECASE)
+VERSION_TOKEN = rf"v?(?P<version>{VERSION_NUMBER})"
+BUILD_METADATA = r"(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
+UA_VERSION = re.compile(VERSION_TOKEN + BUILD_METADATA, re.IGNORECASE)
+UA_VERSION_AFTER_MATCH = re.compile(
+    VERSION_TOKEN + r"(?:\.Meta)?" + BUILD_METADATA + r"(?=\s|$)", re.IGNORECASE
+)
 ENHANCED_UA = re.compile(
     r"^(?P<product>[a-z][a-z0-9.-]*)/v?"
     r"(?P<version>[0-9]{1,5}(?:\.[0-9]{1,5}\.[0-9]{1,5})?)"
-    r"(?P<suffix>\.Meta)?(?=\s|$)",
+    r"(?P<suffix>\.Meta)?" + BUILD_METADATA + r"(?=\s|$)",
     re.IGNORECASE,
 )
 ENHANCED_MINIMUM = {
@@ -83,7 +87,7 @@ def numeric_version(value):
 
 def canonical_ua_minimum(value):
     value = value.strip()
-    if numeric_version(value) is None:
+    if "+" in value or numeric_version(value) is None:
         raise InputError("最低版本请输入 1～4 段数字，例如 1982 或 2.5.11")
     return value
 

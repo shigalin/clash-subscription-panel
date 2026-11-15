@@ -192,7 +192,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
     states = {user_id(u): item_state(u) for u in users}
     active = sum(state == "live" for state in states.values())
     expired = sum(state == "expired" for state in states.values())
-    sort = sort if sort in {"status", "expiry", "recent"} else ""
+    sort = sort if sort in {"status", "expiry", "recent", "updates"} else ""
     direction = "desc" if direction == "desc" else "asc"
     query = query.strip()
     search = query.casefold()
@@ -213,7 +213,10 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
             if sort == "expiry":
                 expiry = expiry_time(user)
                 return expiry.timestamp() if expiry else None
-            return records.get(user.get("usage_key", user["token"]), (0, None))[1]
+            usage_key = user.get("usage_key", user["token"])
+            if sort == "updates":
+                return update_counts.get(usage_key, (0, 0, 0, 0))[0]
+            return records.get(usage_key, (0, None))[1]
         present = [u for u in matches if sort_value(u) is not None]
         absent = [u for u in matches if sort_value(u) is None]
         matches = sorted(present, key=sort_value, reverse=direction == "desc") + absent
@@ -278,7 +281,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
     ])
     def sort_link(label, key):
         selected = sort == key
-        next_direction = "asc" if selected and direction == "desc" else "desc" if selected or key == "recent" else "asc"
+        next_direction = "asc" if selected and direction == "desc" else "desc" if selected or key in {"recent", "updates"} else "asc"
         url = "/panel/?" + urlencode({"q": query, "sort": key, "direction": next_direction})
         arrow = (" ↑" if direction == "asc" else " ↓") if selected else " ↕"
         return f'<a href="{escape(url, quote=True)}">{label}{arrow}</a>'
@@ -291,7 +294,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <button type="submit">搜索</button><a href="/panel/">清除搜索</a>
 </form>
 <p id="page-status">第 {page_number} / {page_count} 页 · 共 {len(matches)} 条结果 · 每页最多 100 条</p>
-<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="累计通过校验的 GET 订阅请求，包含旧版未分类次数">更新总次数 / User-Agent</th><th>操作</th></tr></thead>
+<div class="grid"><table><thead><tr><th>邮箱</th><th>目录名</th><th>{sort_link('状态', 'status')}</th><th>{sort_link('到期时间（北京时间）', 'expiry')}</th><th>{sort_link('最近请求（北京时间）', 'recent')}</th><th title="累计通过校验的 GET 订阅请求，包含旧版未分类次数">{sort_link('更新总次数', 'updates')} / User-Agent</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or empty}</tbody></table></div>
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 

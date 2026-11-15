@@ -392,7 +392,7 @@ def template_form(version, template, enhanced, *, open_enhanced=False):
 <details class="enhanced-config"{open_attr}>
 <summary>增强版模板（{status}）</summary>
 <form class="form" method="post" action="/panel/template/enhanced">{fields(version)}
-<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5。清空并保存后统一使用标准版。</p>
+<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5、Shadowrocket 构建 3233。清空并保存后统一使用标准版。</p>
 <label>增强版模板 YAML<textarea name="enhanced" spellcheck="false">
 {escape(enhanced)}</textarea></label>
 <div><button type="submit">保存增强版模板</button></div></form>

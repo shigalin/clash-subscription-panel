@@ -27,7 +27,7 @@ UA_VERSION = re.compile(rf"v?(?P<version>{VERSION_NUMBER})", re.IGNORECASE)
 UA_VERSION_AFTER_MATCH = re.compile(UA_VERSION.pattern + r"(?:\.Meta)?(?=\s|$)", re.IGNORECASE)
 ENHANCED_UA = re.compile(
     r"^(?P<product>[a-z][a-z0-9.-]*)/v?"
-    r"(?P<version>[0-9]{1,5}\.[0-9]{1,5}\.[0-9]{1,5})"
+    r"(?P<version>[0-9]{1,5}(?:\.[0-9]{1,5}\.[0-9]{1,5})?)"
     r"(?P<suffix>\.Meta)?(?=\s|$)",
     re.IGNORECASE,
 )
@@ -36,6 +36,7 @@ ENHANCED_MINIMUM = {
     "clash.meta": (1, 19, 34),
     "clash-verge": (2, 5, 11),
     "mihomo.party": (2, 0, 5),
+    "shadowrocket": (3233,),
 }
 
 
@@ -65,7 +66,7 @@ def supports_enhanced(agent, rules=()):
     if minimum is None or (match["suffix"] and product != "clashmetaforandroid"):
         return False
     version = tuple(map(int, match["version"].split(".")))
-    return version >= minimum
+    return len(version) == len(minimum) and version >= minimum
 
 
 class InputError(ValueError):

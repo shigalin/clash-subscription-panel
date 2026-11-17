@@ -33,8 +33,8 @@ function showToast(message, error = false) {
 }
 const notices = {
   saved: '订阅保存成功',
-  template: '标准模板保存成功',
-  enhanced: '增强版模板保存成功',
+  template: '兼容版模板保存成功',
+  enhanced: '标准版模板保存成功',
   revoked: '订阅已停用',
   restored: '订阅已恢复',
   deleted: '订阅已删除，链接已失效',
@@ -362,7 +362,7 @@ def ua_rule_form(version, rule=None, draft=None):
 <label>User-Agent 正则<input name="pattern" value="{pattern}" placeholder="^Shadowrocket/" maxlength="{MAX_UA_PATTERN}" spellcheck="false" required></label>
 <p class="form-help">例如 <code>^Shadowrocket/</code> 会读取紧随其后的版本号。也可用一个捕获组或命名组 <code>(?P&lt;version&gt;…)</code> 提取版本。</p>
 <label>最低版本<input name="minimum_version" value="{minimum}" placeholder="例如 1982 或 2.5.11" maxlength="40" spellcheck="false" required></label>
-<p class="form-help">达到最低版本使用增强版。低于门槛或无法读取版本时使用标准版。</p>
+<p class="form-help">达到最低版本使用标准版。低于门槛或无法读取版本时使用兼容版。</p>
 <label>状态<select name="active"><option value="1" {"selected" if active else ""}>启用</option><option value="0" {"" if active else "selected"}>停用</option></select></label>
 <div><button type="submit">保存 UA 规则</button> <a class="button-link" href="/panel/ua-rules">返回规则列表</a></div></form>'''
 
@@ -382,7 +382,7 @@ def ua_rule_list(version, rules):
 <form class="actions" method="post" action="/panel/ua-rules/move">{fields(version)}<input type="hidden" name="id" value="{identity}">{buttons}</form>
 <form method="post" action="/panel/ua-rules/delete">{fields(version)}<input type="hidden" name="id" value="{identity}">
 <button type="submit" class="revoke" data-confirm="删除这条 UA 规则？">删除</button></form></div></td></tr>''')
-    return f'''<p>按顺序采用第一条命中的启用规则。未命中时按内置客户端版本判断，增强版模板为空时统一下发标准版。</p>
+    return f'''<p>按顺序采用第一条命中的启用规则。未命中时按内置客户端版本判断，标准版模板为空时统一下发兼容版。</p>
 <p><a class="button-link" href="/panel/ua-rules/new">新增 UA 规则</a></p>
 <div class="grid"><table><thead><tr><th>顺序</th><th>User-Agent 正则</th><th>最低版本</th><th>状态</th><th>操作</th></tr></thead>
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无自定义规则</td></tr>'}</tbody></table></div>'''
@@ -390,20 +390,20 @@ def ua_rule_list(version, rules):
 
 def template_form(version, template, enhanced, *, open_enhanced=False):
     open_attr = " open" if open_enhanced else ""
-    status = "已启用" if enhanced.strip() else "使用标准版"
+    status = "已启用" if enhanced.strip() else "使用兼容版"
     return f"""<p>用 <code>{{{{UUID}}}}</code> 代入当前订阅的 UUID。可以用 <a href="/panel/ua-rules">UA 规则</a> 自定义模板分流。</p>
 <details class="enhanced-config"{open_attr}>
-<summary>增强版模板（{status}）</summary>
+<summary>标准版模板（{status}）</summary>
 <form class="form" method="post" action="/panel/template/enhanced">{fields(version)}
-<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5、Shadowrocket 构建 3233。清空并保存后统一使用标准版。</p>
-<label>增强版模板 YAML<textarea name="enhanced" spellcheck="false">
+<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5、Shadowrocket 构建 3233。清空并保存后统一使用兼容版。</p>
+<label>标准版模板 YAML<textarea name="enhanced" spellcheck="false">
 {escape(enhanced)}</textarea></label>
-<div><button type="submit">保存增强版模板</button></div></form>
+<div><button type="submit">保存标准版模板</button></div></form>
 </details>
 <form class="form" method="post" action="/panel/template">{fields(version)}
-<label>标准模板 YAML<textarea name="template" spellcheck="false" required>
+<label>兼容版模板 YAML<textarea name="template" spellcheck="false" required>
 {escape(template)}</textarea></label>
-<div><button type="submit" data-confirm="保存标准模板并更新订阅？">保存标准模板</button></div></form>"""
+<div><button type="submit" data-confirm="保存兼容版模板并更新订阅？">保存兼容版模板</button></div></form>"""
 
 
 class Handler(BaseHTTPRequestHandler):

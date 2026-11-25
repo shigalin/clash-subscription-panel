@@ -16,6 +16,7 @@ import usage
 from store import BASE, ORIGIN, WEB_GID, InputError, canonical_uuid, canonical_token, user_id, find_user, folder_for, publish, read, subscription, validate_template
 from store import MARKER, canonical_expiry, canonical_forward, display_expiry, expiry_time, item_state, read_forwards, read_enhanced, supports_enhanced, find_subscription
 from store import MAX_UA_PATTERN, MAX_UA_RULES, canonical_ua_minimum, read_ua_rules, validate_ua_pattern
+from store import personalized_path, read_personalized
 
 SOCKET = Path(os.environ.get("PANEL_SOCKET", "/run/panel/panel.sock"))
 CSRF = secrets.token_urlsafe(32)
@@ -35,6 +36,8 @@ const notices = {
   saved: '订阅保存成功',
   template: '兼容版模板保存成功',
   enhanced: '标准版模板保存成功',
+  personalized: '个人配置已保存',
+  personalized_cleared: '已恢复使用全局模板',
   revoked: '订阅已停用',
   restored: '订阅已恢复',
   deleted: '订阅已删除，链接已失效',
@@ -163,6 +166,19 @@ document.addEventListener('submit', (event) => {
   const message = event.submitter?.dataset.confirm;
   if (message && !confirm(message)) event.preventDefault();
 });
+const configEditor = document.querySelector('textarea[data-config-editor]');
+document.querySelector('.editor-tabs')?.addEventListener('click', (event) => {
+  const tab = event.target.closest('a');
+  if (!tab || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  if (tab.hasAttribute('aria-current')) {
+    event.preventDefault();
+    return;
+  }
+  const unsaved = configEditor && (configEditor.value !== configEditor.defaultValue || document.querySelector('.error'));
+  if (unsaved && !confirm('当前配置有未保存的修改，确定切换？')) {
+    event.preventDefault();
+  }
+});
 """
 
 
@@ -236,6 +252,10 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
         email, folder = escape(user["email"]), escape(user["folder"])
         url = escape(subscription(user), quote=True)
         edit = "/panel/edit?" + urlencode({"id": user_id(user)})
+        personal_link = ""
+        if personalized_path(version, user).is_file():
+            personal_url = escape(edit + "&section=personal", quote=True)
+            personal_link = f'<a class="personal-label" href="{personal_url}" title="编辑个人配置">专属配置</a>'
         state = states[user_id(user)]
         label = STATE_LABELS[state]
         action, button = ("revoke", "停用") if user["active"] else ("restore", "恢复")
@@ -251,7 +271,7 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
             if count else ""
         )
         rows.append(f"""<tr data-state="{state}">
-<td>{email}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
+<td>{email}{personal_link}</td><td><code>{folder}</code></td><td><span class="badge">{label}</span></td>
 <td>{display_expiry(user)}</td>
 <td class="last-request">{last_request}</td>
 <td class="update-count"><div class="update-summary"><strong>{updates}</strong>{old_updates}{agent_html}</div>
@@ -299,6 +319,22 @@ def subscriber_list(version, users, query="", page_number=1, sort="", direction=
 <nav class="pagination" aria-label="订阅分页">{navigation}</nav>"""
 
 
+def editor_tabs(label, selected, links):
+    entries = []
+    for key, text, url in links:
+        current = ' aria-current="page"' if key == selected else ""
+        entries.append(f'<a href="{escape(url, quote=True)}"{current}>{text}</a>')
+    return f'<nav class="editor-tabs" aria-label="{label}">{"".join(entries)}</nav>'
+
+
+def subscriber_tabs(user, selected):
+    edit = "/panel/edit?" + urlencode({"id": user_id(user)})
+    return editor_tabs("订阅编辑", selected, (
+        ("details", "订阅资料", edit),
+        ("personal", "个人配置", edit + "&section=personal"),
+    ))
+
+
 def subscriber_form(version, user=None, draft=None):
     values = draft or user or {}
     original = escape(user["folder"] if user else "", quote=True)
@@ -307,7 +343,8 @@ def subscriber_form(version, user=None, draft=None):
     credential = escape(values.get("uuid", ""), quote=True)
     token = escape(values.get("token", ""), quote=True)
     hint = "<p>修改邮箱前缀会改变订阅路径。修改 UUID 会更新当前链接的配置。</p>" if user else ""
-    return f"""{hint}<form class="form" method="post" action="/panel/subscriber">
+    tabs = subscriber_tabs(user, "details") if user else ""
+    return f"""{tabs}{hint}<form class="form" method="post" action="/panel/subscriber">
 {fields(version)}<input type="hidden" name="folder" value="{original}"><input type="hidden" name="id" value="{identity}">
 <label>邮箱 / 名称 <input name="email" value="{email}" maxlength="254" required></label>
 <label>UUID <input name="uuid" value="{credential}" maxlength="36" required></label>
@@ -319,6 +356,18 @@ autocomplete="off" spellcheck="false" placeholder="留空自动生成新令牌">
 <label>到期时间（北京时间）<input type="datetime-local" name="expires_at" value="{escape(values.get('expires_at', '') or '', quote=True) if draft else display_expiry(values, form=True)}"></label>
 <p class="form-help">留空表示长期有效。到期后链接停止返回配置，延长时间后可继续使用。</p>
 <div><button type="submit">保存订阅</button></div></form>"""
+
+
+def personalized_form(version, user, template):
+    identity = escape(user_id(user), quote=True)
+    label = escape(user["email"])
+    return f"""{subscriber_tabs(user, 'personal')}
+<form class="form yaml-editor" method="post" action="/panel/subscriber/personalized">{fields(version)}
+<input type="hidden" name="id" value="{identity}">
+<label>{label} 的个人配置 YAML<textarea name="personalized" data-config-editor spellcheck="false">
+{escape(template)}</textarea></label>
+<p class="form-help">保存完整 YAML 后，此订阅的所有客户端都会收到个人配置。支持 <code>{{{{UUID}}}}</code>。清空并保存后恢复按 UA 下发全局模板。</p>
+<div><button type="submit">保存个人配置</button></div></form>"""
 
 
 def forward_form(version, rule=None, draft=None):
@@ -388,22 +437,27 @@ def ua_rule_list(version, rules):
 <tbody>{''.join(rows) or '<tr><td colspan="5">暂无自定义规则</td></tr>'}</tbody></table></div>'''
 
 
-def template_form(version, template, enhanced, *, open_enhanced=False):
-    open_attr = " open" if open_enhanced else ""
-    status = "已启用" if enhanced.strip() else "使用兼容版"
-    return f"""<p>用 <code>{{{{UUID}}}}</code> 代入当前订阅的 UUID。可以用 <a href="/panel/ua-rules">UA 规则</a> 自定义模板分流。</p>
-<details class="enhanced-config"{open_attr}>
-<summary>标准版模板（{status}）</summary>
-<form class="form" method="post" action="/panel/template/enhanced">{fields(version)}
-<p class="form-help">粘贴包含 Snell v6 的完整 YAML。未命中自定义规则时，内置最低版本为 ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5、Shadowrocket 构建 3233。清空并保存后统一使用兼容版。</p>
-<label>标准版模板 YAML<textarea name="enhanced" spellcheck="false">
-{escape(enhanced)}</textarea></label>
-<div><button type="submit">保存标准版模板</button></div></form>
-</details>
-<form class="form" method="post" action="/panel/template">{fields(version)}
-<label>兼容版模板 YAML<textarea name="template" spellcheck="false" required>
+def template_form(version, template, *, standard):
+    tabs = editor_tabs("全局模板版本", "standard" if standard else "compatibility", (
+        ("standard", "标准版", "/panel/template"),
+        ("compatibility", "兼容版", "/panel/template?variant=compatibility"),
+    ))
+    label = "标准版" if standard else "兼容版"
+    action, name, required = ("/panel/template/enhanced", "enhanced", "") if standard else ("/panel/template", "template", " required")
+    if standard:
+        description = '达到 <a href="/panel/ua-rules">UA 版本门槛</a> 的客户端使用。支持 <code>{{UUID}}</code>。清空并保存后，全局订阅统一使用兼容版。'
+        minimums = """<details class="form-help"><summary>内置最低版本</summary>
+ClashMetaForAndroid 2.11.37、clash.meta 1.19.34、clash-verge 2.5.11、mihomo.party 2.0.5、Shadowrocket 构建 3233。</details>"""
+    else:
+        description = '旧客户端、无法识别的客户端及标准版为空时使用。模板须包含 <code>{{UUID}}</code>。'
+        minimums = ""
+    return f"""{tabs}
+<form class="form yaml-editor" method="post" action="{action}">{fields(version)}
+<p class="form-help">{description}</p>
+{minimums}
+<label>{label} YAML<textarea name="{name}" data-config-editor spellcheck="false"{required}>
 {escape(template)}</textarea></label>
-<div><button type="submit" data-confirm="保存兼容版模板并更新订阅？">保存兼容版模板</button></div></form>"""
+<div><button type="submit" data-confirm="保存{label}并更新使用此模板的订阅？">保存{label}</button></div></form>"""
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -483,13 +537,15 @@ class Handler(BaseHTTPRequestHandler):
             if state != "live":
                 return self.respond(404)
             directory = BASE / version
+            personalized = read_personalized(version, user)
+            has_standard = (directory / "enhanced.yaml").is_file()
             # Serve both variants without a shared Last-Modified validator.
             # Older snapshots can still contain generated per-subscription files.
-            if (directory / "enhanced.yaml").is_file() or (directory / "personalized").is_dir():
-                enhanced = read_enhanced(version)
-                if enhanced and not supports_enhanced(agent, read_ua_rules(version)):
-                    enhanced = ""
-                body = (enhanced or template).replace(MARKER, user["uuid"]).encode("utf-8")
+            if personalized or has_standard or (directory / "personalized").is_dir():
+                selected = personalized
+                if not selected and has_standard and supports_enhanced(agent, read_ua_rules(version)):
+                    selected = read_enhanced(version)
+                body = (selected or template).replace(MARKER, user["uuid"]).encode("utf-8")
                 return self.respond(200, body, "text/plain; charset=utf-8", disposition="inline",
                                     headers={"Vary": "User-Agent"})
             return self.respond(200, content_type="text/plain; charset=utf-8", headers={"X-Accel-Redirect": f"/_clash_file/{user['token']}/{quote(user['folder'], safe='+')}"})
@@ -540,11 +596,13 @@ class Handler(BaseHTTPRequestHandler):
             user = find_user(users, parameters.get("id", [""])[0], parameters.get("folder", [""])[0])
             if not user:
                 return self.respond(404)
+            if parameters.get("section", [""])[0] == "personal":
+                return self.page("编辑订阅", personalized_form(version, user, read_personalized(version, user)))
             return self.page("编辑订阅", subscriber_form(version, user))
         if path.path == "/panel/template":
-            notice = parse_qs(path.query).get("notice", [""])[0]
-            return self.page("编辑 YAML 模板", template_form(
-                version, template, read_enhanced(version), open_enhanced=notice == "enhanced"))
+            standard = parse_qs(path.query).get("variant", [""])[0] != "compatibility"
+            selected = read_enhanced(version) if standard else template
+            return self.page("编辑 YAML 模板", template_form(version, selected, standard=standard))
         output = io.StringIO(newline="")
         writer = csv.writer(output, delimiter="\t", lineterminator="\n")
         writer.writerow(["email", "uuid", "folder", "url", "status", "expires_at"])
@@ -554,7 +612,7 @@ class Handler(BaseHTTPRequestHandler):
                      disposition='attachment; filename="clash-subscriptions.tsv"')
 
     def do_POST(self):
-        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/template", "/panel/template/enhanced", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete", "/panel/ua-rules/save", "/panel/ua-rules/move", "/panel/ua-rules/delete"}:
+        if self.path not in {"/panel/state", "/panel/subscriber", "/panel/subscriber/delete", "/panel/subscriber/personalized", "/panel/template", "/panel/template/enhanced", "/panel/user-agents/delete", "/panel/forwards/save", "/panel/forwards/delete", "/panel/ua-rules/save", "/panel/ua-rules/move", "/panel/ua-rules/delete"}:
             return self.respond(404)
         if self.headers.get("Origin") != ORIGIN:
             return self.respond(403)
@@ -589,6 +647,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.respond(500)
             return self.respond(204)
         enhanced = None
+        personalized_overrides = None
         try:
             if self.path.startswith("/panel/forwards/"):
                 if self.path == "/panel/forwards/delete":
@@ -640,6 +699,18 @@ class Handler(BaseHTTPRequestHandler):
                     user.setdefault("usage_key", user["token"])
                 user.update(email=email, folder=new_folder, uuid=credential, token=new_token, expires_at=expires_at)
                 notice = "saved"
+            elif self.path == "/panel/subscriber/personalized":
+                if not identity or not user:
+                    return self.respond(404)
+                if "personalized" not in form:
+                    return self.respond(400)
+                personalized = form["personalized"].replace("\r\n", "\n")
+                if personalized.strip():
+                    validate_template(personalized, require_marker=False)
+                else:
+                    personalized = ""
+                personalized_overrides = {identity: personalized}
+                notice = "personalized" if personalized else "personalized_cleared"
             elif self.path == "/panel/template/enhanced":
                 if "enhanced" not in form:
                     return self.respond(400)
@@ -655,15 +726,16 @@ class Handler(BaseHTTPRequestHandler):
                 # Browsers normalize textarea line breaks on form submission.
                 template = template.replace("\r\n", "\n")
                 notice = "template"
-            publish(users, template, rules, enhanced=enhanced)
+            publish(users, template, rules, enhanced=enhanced, personalized_overrides=personalized_overrides)
         except InputError as exc:
             if self.path.startswith("/panel/forwards/"):
                 return self.page("编辑特殊转发" if rule else "新增特殊转发", forward_form(version, rule, form), 400, str(exc))
             if self.path == "/panel/template":
-                return self.page("编辑 YAML 模板", template_form(version, template, read_enhanced(version)), 400, str(exc))
+                return self.page("编辑 YAML 模板", template_form(version, template, standard=False), 400, str(exc))
             if self.path == "/panel/template/enhanced":
-                return self.page("编辑 YAML 模板", template_form(
-                    version, template, form["enhanced"], open_enhanced=True), 400, str(exc))
+                return self.page("编辑 YAML 模板", template_form(version, enhanced, standard=True), 400, str(exc))
+            if self.path == "/panel/subscriber/personalized":
+                return self.page("编辑订阅", personalized_form(version, user, personalized), 400, str(exc))
             return self.page("编辑订阅" if user else "新增订阅",
                              subscriber_form(version, user, form), 400, str(exc))
         except OSError:
@@ -676,7 +748,12 @@ class Handler(BaseHTTPRequestHandler):
             except sqlite3.Error:
                 notice = "deleted_history_retained"
         destination = {"notice": notice}
+        if self.path == "/panel/subscriber/personalized":
+            destination.update(id=identity, section="personal")
+            return self.respond(303, location="/panel/edit?" + urlencode(destination))
         if self.path in {"/panel/template", "/panel/template/enhanced"}:
+            if self.path == "/panel/template":
+                destination["variant"] = "compatibility"
             return self.respond(303, location="/panel/template?" + urlencode(destination))
         if self.path in {"/panel/state", "/panel/subscriber/delete"}:
             destination.update(q=form.get("q", ""), page=form.get("page", "1"), sort=form.get("sort", ""), direction=form.get("direction", "asc"))

@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from hashlib import sha256
 import ipaddress
 import os
 from pathlib import Path
@@ -294,7 +295,23 @@ def read_ua_rules(version):
         return []
 
 
-def publish(users, template, forwards=None, *, enhanced=None, ua_rules=None):
+def personalized_path(version, user):
+    if not GENERATION.fullmatch(version):
+        raise RuntimeError("Invalid subscription generation")
+    identity = sha256(user_id(user).encode("utf-8")).hexdigest()
+    return BASE / version / "subscriber-templates" / (identity + ".yaml")
+
+
+def read_personalized(version, user):
+    if version is None:
+        return ""
+    try:
+        return personalized_path(version, user).read_bytes().decode("utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def publish(users, template, forwards=None, *, enhanced=None, ua_rules=None, personalized_overrides=None):
     """Build a complete private snapshot, then switch the HTTPS document root."""
     group = WEB_GID
     version = "gen-" + secrets.token_hex(16)
@@ -308,6 +325,7 @@ def publish(users, template, forwards=None, *, enhanced=None, ua_rules=None):
         enhanced = read_enhanced(previous)
     if ua_rules is None:
         ua_rules = read_ua_rules(previous)
+    personalized_overrides = personalized_overrides or {}
 
     def directory(path):
         path.mkdir(exist_ok=True)
@@ -330,6 +348,16 @@ def publish(users, template, forwards=None, *, enhanced=None, ua_rules=None):
         directory(stage / "live")
         (stage / "revoked").mkdir()
         for user in users:
+            identity = user_id(user)
+            if identity in personalized_overrides:
+                personalized = personalized_overrides[identity]
+            else:
+                personalized = read_personalized(previous, user)
+            if personalized:
+                source = personalized_path(version, user)
+                source.parent.mkdir(mode=0o700, exist_ok=True)
+                source.write_bytes(personalized.encode("utf-8"))
+                source.chmod(0o600)
             status = "live" if user["active"] else "revoked"
             account = stage / status / user["folder"]
             directory(account)
